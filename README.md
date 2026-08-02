@@ -79,6 +79,22 @@ PYTHONPATH=mt3/local_cpu_sitecustomize uv run python -m t5x.train \
   --gin_file=mt3/gin/guitar_pilot_local.gin
 ```
 
+### Transcribe a WAV with a fine-tuned guitar checkpoint
+
+```sh
+uv run python mt3/scripts/transcribe_guitar.py \
+  --checkpoint ../runs/guitar_pilot_finetune/checkpoint_100 \
+  --input /path/to/song.wav \
+  --output /path/to/song_transcription.mid
+```
+
+The generated MIDI always contains `clean-rhythm`, `clean-lead`,
+`distorted-rhythm`, and `distorted-lead` tracks. Lanes without predicted notes
+are left empty.
+
+On the local Apple-Silicon environment, the command automatically applies the
+same TensorFlow input-pipeline workaround used by the training smoke run.
+
 ## Transcribe your own audio
 
 Use our [colab notebook](https://colab.research.google.com/github/magenta/mt3/blob/main/mt3/colab/music_transcription_with_transformers.ipynb) to
