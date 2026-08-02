@@ -138,6 +138,32 @@ GUITARSET_CONFIG = DatasetConfig(
     ])
 
 
+# Local Phase 1 corpus. Paths are intentionally relative to the MT3 fork; run
+# the training and inspection commands from that repository directory.
+GUITAR_PILOT_CONFIG = DatasetConfig(
+    name='guitar_pilot',
+    paths={
+        'train': '../data/pilot/tfrecord/train.tfrecord',
+        'test': '../data/pilot/tfrecord/test.tfrecord',
+    },
+    features={
+        'audio': tf.io.FixedLenFeature([], dtype=tf.string),
+        'sequence': tf.io.FixedLenFeature([], dtype=tf.string),
+        'id': tf.io.FixedLenFeature([], dtype=tf.string),
+    },
+    train_split='train',
+    train_eval_split='test',
+    infer_eval_splits=[
+        InferEvalSplit(name='test', suffix='eval_test'),
+    ],
+    track_specs=[
+        note_sequences.TrackSpec('clean-rhythm', program=26),
+        note_sequences.TrackSpec('clean-lead', program=27),
+        note_sequences.TrackSpec('distorted-rhythm', program=29),
+        note_sequences.TrackSpec('distorted-lead', program=30),
+    ])
+
+
 URMP_CONFIG = DatasetConfig(
     name='urmp',
     paths={
@@ -321,5 +347,3 @@ SLAKH_CONFIG = DatasetConfig(
         InferEvalSplit(name='validation_subset', suffix='validation'),
         InferEvalSplit(name='test', suffix='test', include_in_mixture=False)
     ])
-
-

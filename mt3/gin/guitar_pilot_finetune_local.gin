@@ -1,0 +1,33 @@
+# Full-size, pretrained MT3 fine-tuning calibration on the local guitar pilot.
+#
+# Load after model.gin and train.gin. Unlike guitar_pilot_local.gin, this file
+# deliberately leaves MT3's standard T5.1.1 Small architecture untouched.
+
+from t5x import utils
+from mt3 import local_training
+
+TASK_PREFIX = 'guitar_pilot_notes_ties'
+NUM_VELOCITY_BINS = 1
+PROGRAM_GRANULARITY = 'full'
+USE_CACHED_TASKS = False
+
+MODEL_DIR = '/Users/marek/projects/transcription/runs/guitar_pilot_finetune_v1'
+CHECKPOINT_PATH = '/Users/marek/projects/transcription/model/mt3/checkpoint_0'
+
+# MT3's normal training lengths, constrained to one example on this Mac.
+TASK_FEATURE_LENGTHS = {'inputs': 256, 'targets': 1024}
+BATCH_SIZE = 1
+TRAIN_STEPS = 1
+EVAL_STEPS = 1
+EVALUATOR_NUM_EXAMPLES = 1
+
+train/utils.DatasetConfig.batch_size = 1
+train_eval/utils.DatasetConfig.batch_size = 1
+infer_eval/utils.DatasetConfig.batch_size = 1
+
+utils.CheckpointConfig.restore = @local_training.restore_checkpoint_config()
+local_training.restore_checkpoint_config:
+  path = %CHECKPOINT_PATH
+  mode = 'specific'
+  dtype = 'float32'
+utils.SaveCheckpointConfig.period = 1

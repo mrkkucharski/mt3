@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mt3"
+dynamic = ["version"]
+description = "Multi-Task Multitrack Music Transcription"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "Apache-2.0"
+dependencies = [
+  "absl-py",
+  "flax",
+  "gin-config",
+  "immutabledict",
+  "librosa",
+  "mir-eval",
+  "mido>=1.3,<2",
+  "nltk==3.9.1",
+  "note-seq",
+  "numpy",
+  "pretty-midi",
+  "protobuf>=6.31,<6.33",
+  "scikit-learn",
+  "scipy",
+  "seqio",
+  "t5",
+  "t5x",
+  "tensorflow",
+  "tensorflow-datasets",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.urls]
+Repository = "https://github.com/magenta/mt3"
+
+[tool.setuptools.dynamic]
+version = {attr = "mt3.version.__version__"}
+
+[tool.setuptools.package-data]
+mt3 = ["gin/*.gin", "gin/**/*.gin"]
+
+[tool.uv]
+required-version = ">=0.9.20,<0.10"
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+override-dependencies = [
+  "seqio-nightly; sys_platform != 'darwin'",
+  "tensorflow-cpu; sys_platform != 'darwin'",
+  "tfds-nightly; sys_platform != 'darwin'",
+]
+
+[tool.uv.sources]
+flax = { git = "https://github.com/google/flax" }
+note-seq = { git = "https://github.com/magenta/note-seq" }
+seqio = { git = "https://github.com/google/seqio" }
+t5x = { git = "https://github.com/google-research/t5x" }

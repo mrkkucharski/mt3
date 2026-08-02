@@ -4,6 +4,81 @@ MT3 is a multi-instrument automatic music transcription model that uses the [T5X
 
 This is not an officially supported Google product.
 
+## Reproducible Mac CPU environment
+
+This fork uses [uv](https://docs.astral.sh/uv/) and Python 3.11 for the
+Apple Silicon CPU development environment. Git-based dependencies are resolved
+to immutable commits in `uv.lock`.
+
+Install the system audio dependency once (skip this if `ffmpeg` is already on
+your `PATH`):
+
+```sh
+brew install ffmpeg
+```
+
+```sh
+uv sync --frozen
+uv run python -c "import jax; print(jax.devices())"
+uv run python -c "import mt3; print(mt3.__path__)"
+uv run pytest -q mt3
+```
+
+The local `.venv` is intentionally not committed. Use a separate lock or
+container definition for the Linux CUDA training environment; do not install
+`jax-metal` into this CPU environment.
+
+### Validate the guitar pilot dataset
+
+From the MT3 repository, validate the dataset before adding it to a training
+run:
+
+```sh
+uv run python mt3/scripts/validate_guitar_dataset.py --dataset ../data/pilot
+```
+
+Add `--strict` to treat incomplete metadata, such as an unrecorded render
+preset, as a failure.
+
+### Build MT3 training records from the pilot dataset
+
+After validation, convert the MIDI/WAV pairs into MT3-compatible TFRecords:
+
+```sh
+uv run python mt3/scripts/build_guitar_tfrecord.py --dataset ../data/pilot
+```
+
+The builder preserves the four guitar lanes with distinct MT3 program IDs:
+`clean-rhythm=26`, `clean-lead=27`, `distorted-rhythm=29`, and
+`distorted-lead=30`. It writes one TFRecord per populated split to
+`../data/pilot/tfrecord/`.
+
+### Smoke-test the MT3 preprocessing task
+
+Confirm that a local TFRecord is converted to spectrogram frames and
+lane-labelled event tokens before starting training:
+
+```sh
+uv run python mt3/scripts/smoke_guitar_task.py
+```
+
+The pilot task is `guitar_pilot_notes_ties_vb1_train`. Keep
+`PROGRAM_GRANULARITY = 'full'` in its training configuration so program IDs
+continue to distinguish the four lanes.
+
+### Run the local training smoke test
+
+This three-step CPU run checks the task, model, optimizer, checkpoint and log
+paths together. It is not a quality or accuracy experiment.
+
+```sh
+PYTHONPATH=mt3/local_cpu_sitecustomize uv run python -m t5x.train \
+  --gin_file=mt3/gin/model.gin \
+  --gin_file=mt3/gin/train.gin \
+  --gin_file=mt3/gin/local_tiny.gin \
+  --gin_file=mt3/gin/guitar_pilot_local.gin
+```
+
 ## Transcribe your own audio
 
 Use our [colab notebook](https://colab.research.google.com/github/magenta/mt3/blob/main/mt3/colab/music_transcription_with_transformers.ipynb) to
