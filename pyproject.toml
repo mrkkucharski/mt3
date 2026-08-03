@@ -31,6 +31,10 @@ dependencies = [
   "tensorflow-datasets",
 ]
 
+[project.scripts]
+mt3-transcribe = "mt3.cli:main"
+mt3-download-model = "mt3.model_download:main"
+
 [dependency-groups]
 dev = [
   "pytest>=8,<9",

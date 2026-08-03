@@ -20,10 +20,16 @@ from pathlib import Path
 import gin
 import jax
 import mido
-import note_seq
 import numpy as np
 import seqio
 import tensorflow as tf
+
+# TensorFlow 2.20's tf.data meta-optimizer is incompatible with the MT3/SeqIO
+# inference pipeline on the project's Apple-Silicon environment. This must be
+# configured before importing note_seq, which can initialize TensorFlow.
+tf.config.optimizer.set_experimental_options({'disable_meta_optimizer': True})
+
+import note_seq
 from t5.data import preprocessors as t5_preprocessors
 from t5x import adafactor
 from t5x import partitioning
@@ -42,11 +48,6 @@ SAMPLE_RATE = 16000
 INPUT_LENGTH = 256
 TARGET_LENGTH = 1024
 
-# TensorFlow 2.20's tf.data meta-optimizer is incompatible with the MT3/SeqIO
-# inference pipeline on the project's Apple-Silicon environment. Disabling it
-# here keeps this command self-contained; it does not affect model weights or
-# decoded predictions.
-tf.config.optimizer.set_experimental_options({'disable_meta_optimizer': True})
 LANES = (
     ('clean-rhythm', 26),
     ('clean-lead', 27),
