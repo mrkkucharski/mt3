@@ -1,4 +1,4 @@
-"""Local training helpers for the guitar-pilot workflow."""
+"""Compatibility helpers for local MT3 training workflows."""
 
 from __future__ import annotations
 

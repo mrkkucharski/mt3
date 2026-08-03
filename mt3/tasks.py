@@ -298,20 +298,6 @@ add_transcription_task_to_registry(
     onsets_only=False,
     include_ties=True)
 
-# Transcribe the local Phase 1 four-lane guitar pilot dataset. Program IDs are
-# assigned by build_guitar_tfrecord.py and must remain at full granularity so
-# they continue to identify the four lanes.
-add_transcription_task_to_registry(
-    dataset_config=datasets.GUITAR_PILOT_CONFIG,
-    spectrogram_config=SPECTROGRAM_CONFIG,
-    vocab_config=VOCAB_CONFIG_NOVELOCITY,
-    tokenize_fn=functools.partial(
-        preprocessors.tokenize_transcription_example,
-        audio_is_samples=False,
-        id_feature_key='id'),
-    onsets_only=False,
-    include_ties=True)
-
 # Transcribe URMP mixes, with ties.
 add_transcription_task_to_registry(
     dataset_config=datasets.URMP_CONFIG,

@@ -80,73 +80,6 @@ The local `.venv` is intentionally not committed. Use a separate lock or
 container definition for the Linux CUDA training environment; do not install
 `jax-metal` into this CPU environment.
 
-### Validate the guitar pilot dataset
-
-From the MT3 repository, validate the dataset before adding it to a training
-run:
-
-```sh
-uv run python mt3/scripts/validate_guitar_dataset.py --dataset ../data/pilot
-```
-
-Add `--strict` to treat incomplete metadata, such as an unrecorded render
-preset, as a failure.
-
-### Build MT3 training records from the pilot dataset
-
-After validation, convert the MIDI/WAV pairs into MT3-compatible TFRecords:
-
-```sh
-uv run python mt3/scripts/build_guitar_tfrecord.py --dataset ../data/pilot
-```
-
-The builder preserves the four guitar lanes with distinct MT3 program IDs:
-`clean-rhythm=26`, `clean-lead=27`, `distorted-rhythm=29`, and
-`distorted-lead=30`. It writes one TFRecord per populated split to
-`../data/pilot/tfrecord/`.
-
-### Smoke-test the MT3 preprocessing task
-
-Confirm that a local TFRecord is converted to spectrogram frames and
-lane-labelled event tokens before starting training:
-
-```sh
-uv run python mt3/scripts/smoke_guitar_task.py
-```
-
-The pilot task is `guitar_pilot_notes_ties_vb1_train`. Keep
-`PROGRAM_GRANULARITY = 'full'` in its training configuration so program IDs
-continue to distinguish the four lanes.
-
-### Run the local training smoke test
-
-This three-step CPU run checks the task, model, optimizer, checkpoint and log
-paths together. It is not a quality or accuracy experiment.
-
-```sh
-PYTHONPATH=mt3/local_cpu_sitecustomize uv run python -m t5x.train \
-  --gin_file=mt3/gin/model.gin \
-  --gin_file=mt3/gin/train.gin \
-  --gin_file=mt3/gin/local_tiny.gin \
-  --gin_file=mt3/gin/guitar_pilot_local.gin
-```
-
-### Transcribe a WAV with a fine-tuned guitar checkpoint
-
-```sh
-uv run python mt3/scripts/transcribe_guitar.py \
-  --checkpoint ../runs/guitar_pilot_finetune/checkpoint_100 \
-  --input /path/to/song.wav \
-  --output /path/to/song_transcription.mid
-```
-
-The generated MIDI always contains `clean-rhythm`, `clean-lead`,
-`distorted-rhythm`, and `distorted-lead` tracks. Lanes without predicted notes
-are left empty.
-
-On the local Apple-Silicon environment, the command automatically applies the
-same TensorFlow input-pipeline workaround used by the training smoke run.
-
 ### Transcribe general music with the original MT3 checkpoint
 
 ```sh
@@ -157,8 +90,7 @@ uv run mt3-transcribe \
 ```
 
 This command retains MT3's complete multi-instrument prediction, including all
-predicted MIDI programs and drums. It does not apply the project's guitar-lane
-mapping.
+predicted MIDI programs and drums.
 
 ## Transcribe your own audio
 
