@@ -54,7 +54,10 @@ def download_model(output_dir: Path) -> Path:
   total_bytes = sum(int(item['size']) for item in objects)
   print(f'Downloading {MODEL_ID}: {len(objects)} files ({total_bytes / 1024 / 1024:.1f} MiB)')
   for index, item in enumerate(objects, 1):
-    destination = output_dir / item['name'].removeprefix(PREFIX)
+    # The bucket's own objects have no `checkpoint_0/` prefix -- this
+    # directory is our own on-disk layout, matching every documented
+    # `--checkpoint .../checkpoint_0` invocation, not part of the bucket.
+    destination = checkpoint_dir / item['name'].removeprefix(PREFIX)
     if _matches(destination, item):
       continue
     destination.parent.mkdir(parents=True, exist_ok=True)
