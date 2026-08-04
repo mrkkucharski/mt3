@@ -1,0 +1,58 @@
+# Phase 0 gate (MT3_guitar_transcription_plan.md): overfit a tiny, randomly
+# initialized MT3 configuration on two short rendered excerpts covering the
+# (program, rhythm) distinction, until onset+offset F1 over (program, rhythm)
+# pairs reaches at least 0.95. This is a plumbing/codec check, not an
+# accuracy experiment -- see mt3/scripts/phase0_gate.py for the excerpts and
+# mt3/scripts/run_phase0_gate_eval.py for the F1 check run after training.
+#
+# Load after train.gin and model.gin:
+#   --gin_file=mt3/gin/train.gin
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/guitar_pilot_gate_local.gin
+
+from mt3 import network
+from mt3.scripts import phase0_gate
+from t5x import utils
+
+TASK_PREFIX = 'guitar_pilot_gate_notes'
+NUM_VELOCITY_BINS = 1
+PROGRAM_GRANULARITY = 'full'
+USE_CACHED_TASKS = False
+
+# Orbax on this local stack requires an absolute checkpoint path.
+MODEL_DIR = '/Users/marek/projects/transcription/runs/phase0_gate_v1'
+TASK_FEATURE_LENGTHS = {'inputs': 256, 'targets': 128}
+# Must divide the default eval_period (5000) evenly, or t5x.train raises.
+TRAIN_STEPS = 50000
+EVAL_STEPS = 1
+BATCH_SIZE = 2
+
+# train.gin's default (factors='constant', base_learning_rate=0.001) barely
+# moves a randomly initialized tiny model in a few thousand steps. A pure
+# high constant LR (tried: 0.01) reaches accuracy=1 fast (~step 2500) but
+# then destabilizes (accuracy dropped back to 0.95, loss rose) since nothing
+# decays it back down for fine-grained convergence. Warm up fast, then decay.
+utils.create_learning_rate_scheduler:
+  factors = 'constant * linear_warmup * rsqrt_decay'
+  base_learning_rate = 0.01
+  warmup_steps = 100
+
+# local_tiny.gin (if loaded) configures T5X's example network; MT3 uses its
+# own Transformer implementation, so the tiny override is repeated here.
+mt3.network.Transformer.config = @mt3.network.T5Config()
+mt3.network.T5Config:
+  dtype = 'float32'
+  emb_dim = 32
+  num_heads = 4
+  num_encoder_layers = 2
+  num_decoder_layers = 2
+  head_dim = 8
+  mlp_dim = 64
+  mlp_activations = ('gelu', 'linear')
+  dropout_rate = 0.0
+  logits_via_embedding = False
+
+train/utils.DatasetConfig.batch_size = %BATCH_SIZE
+train_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
+infer_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
+utils.SaveCheckpointConfig.period = %TRAIN_STEPS

@@ -170,7 +170,7 @@ def add_transcription_task_to_registry(
               targets_feature_keys=['targets']),
           run_length_encoding.remove_redundant_state_changes_fn(
               feature_key='targets', codec=codec,
-              state_change_event_types=['velocity', 'program']),
+              state_change_event_types=['velocity', 'program', 'rhythm']),
           functools.partial(
               preprocessors.compute_spectrograms,
               spectrogram_config=spectrogram_config),
@@ -295,6 +295,20 @@ add_transcription_task_to_registry(
     spectrogram_config=SPECTROGRAM_CONFIG,
     vocab_config=VOCAB_CONFIG_NOVELOCITY,
     tokenize_fn=preprocessors.tokenize_guitarset_example,
+    onsets_only=False,
+    include_ties=True)
+
+# Transcribe the guitar-pilot corpus (DATA_CONTRACT.md), with ties. Full
+# program granularity, since `rhythm` is a real distinction to learn: full
+# and midi_class both retain it at eval time (see PROGRAM_GRANULARITIES).
+add_transcription_task_to_registry(
+    dataset_config=datasets.GUITAR_PILOT_CONFIG,
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY,
+    tokenize_fn=functools.partial(
+        preprocessors.tokenize_transcription_example,
+        audio_is_samples=False,
+        id_feature_key='id'),
     onsets_only=False,
     include_ties=True)
 

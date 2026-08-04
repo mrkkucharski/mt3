@@ -17,9 +17,10 @@
 import dataclasses
 import itertools
 
-from typing import MutableMapping, MutableSet, Optional, Sequence, Tuple
+from typing import List, MutableMapping, MutableSet, Optional, Sequence, Tuple
 
 from mt3 import event_codec
+from mt3 import general_midi
 from mt3 import run_length_encoding
 from mt3 import vocabularies
 
@@ -37,12 +38,28 @@ class TrackSpec:
   name: str
   program: int = 0
   is_drum: bool = False
+  # None: don't filter by rhythm (matches every note regardless of role).
+  rhythm: Optional[bool] = None
 
 
-def extract_track(ns, program, is_drum):
+def extract_track(ns, program, is_drum, rhythm: Optional[bool] = None,
+                  rhythm_map_fn=lambda rhythm: rhythm):
+  """Extract notes matching `program`/`is_drum`, and `rhythm` if given.
+
+  `rhythm_map_fn` lets callers apply the same granularity collapse (see
+  `vocabularies.PROGRAM_GRANULARITIES`) to each note's rhythm flag before
+  comparing it against `rhythm`, so filtering stays consistent with grouping
+  done under that granularity.
+  """
+  rhythm_by_instrument = instrument_rhythms(ns) if rhythm is not None else None
   track = note_seq.NoteSequence(ticks_per_quarter=220)
-  track_notes = [note for note in ns.notes
-                 if note.program == program and note.is_drum == is_drum]
+  track_notes = [
+      note for note in ns.notes
+      if note.program == program and note.is_drum == is_drum
+      and (rhythm_by_instrument is None or
+           rhythm_map_fn(rhythm_by_instrument.get(note.instrument, False))
+           == rhythm)
+  ]
   track.notes.extend(track_notes)
   track.total_time = (max(note.end_time for note in track.notes)
                       if track.notes else 0.0)
@@ -69,19 +86,53 @@ def trim_overlapping_notes(ns: note_seq.NoteSequence) -> note_seq.NoteSequence:
   return ns_trimmed
 
 
-def assign_instruments(ns: note_seq.NoteSequence) -> None:
-  """Assign instrument numbers to notes; modifies NoteSequence in place."""
-  program_instruments = {}
-  for note in ns.notes:
-    if note.program not in program_instruments and not note.is_drum:
-      num_instruments = len(program_instruments)
-      note.instrument = (num_instruments if num_instruments < 9
-                         else num_instruments + 1)
-      program_instruments[note.program] = note.instrument
-    elif note.is_drum:
+def assign_instruments(
+    ns: note_seq.NoteSequence,
+    note_rhythms: Optional[Sequence[bool]] = None,
+) -> None:
+  """Assign instrument numbers to notes; modifies NoteSequence in place.
+
+  Notes are grouped into instruments by `(program, rhythm)` pair, where
+  `rhythm` defaults to False for every note when `note_rhythms` is omitted —
+  degenerating to the original program-only grouping. `rhythm` has no field
+  on the `Note` proto, so this is the carrier: `ns.instrument_infos` is
+  rebuilt with the canonical `<slug>[:rhythm]` name for each assigned
+  instrument, which is what a written MIDI file will use as its track name.
+
+  Args:
+    ns: NoteSequence to modify in place.
+    note_rhythms: optional, one bool per note in `ns.notes`, in order.
+  """
+  if note_rhythms is not None and len(note_rhythms) != len(ns.notes):
+    raise ValueError(
+        'note_rhythms must have exactly one entry per note in ns.notes: '
+        f'got {len(note_rhythms)} for {len(ns.notes)} notes')
+
+  del ns.instrument_infos[:]
+  key_instruments: MutableMapping[Tuple[int, bool], int] = {}
+  drums_named = False
+  for i, note in enumerate(ns.notes):
+    if note.is_drum:
       note.instrument = 9
-    else:
-      note.instrument = program_instruments[note.program]
+      if not drums_named:
+        ns.instrument_infos.add(
+            instrument=9,
+            name=general_midi.instrument_name(
+                program=None, is_drum=True, rhythm=False))
+        drums_named = True
+      continue
+    rhythm = bool(note_rhythms[i]) if note_rhythms is not None else False
+    key = (note.program, rhythm)
+    if key not in key_instruments:
+      num_instruments = len(key_instruments)
+      instrument = (num_instruments if num_instruments < 9
+                   else num_instruments + 1)
+      key_instruments[key] = instrument
+      ns.instrument_infos.add(
+          instrument=instrument,
+          name=general_midi.instrument_name(
+              program=note.program, is_drum=False, rhythm=rhythm))
+    note.instrument = key_instruments[key]
 
 
 def validate_note_sequence(ns: note_seq.NoteSequence) -> None:
@@ -100,15 +151,18 @@ def note_arrays_to_note_sequence(
     offset_times: Optional[Sequence[float]] = None,
     velocities: Optional[Sequence[int]] = None,
     programs: Optional[Sequence[int]] = None,
-    is_drums: Optional[Sequence[bool]] = None
+    is_drums: Optional[Sequence[bool]] = None,
+    rhythms: Optional[Sequence[bool]] = None,
 ) -> note_seq.NoteSequence:
   """Convert note onset / offset / pitch / velocity arrays to NoteSequence."""
   ns = note_seq.NoteSequence(ticks_per_quarter=220)
-  for onset_time, offset_time, pitch, velocity, program, is_drum in itertools.zip_longest(
+  note_rhythms = []
+  for onset_time, offset_time, pitch, velocity, program, is_drum, rhythm in itertools.zip_longest(
       onset_times, [] if offset_times is None else offset_times,
       pitches, [] if velocities is None else velocities,
       [] if programs is None else programs,
-      [] if is_drums is None else is_drums):
+      [] if is_drums is None else is_drums,
+      [] if rhythms is None else rhythms):
     if offset_time is None:
       offset_time = onset_time + DEFAULT_NOTE_DURATION
     if velocity is None:
@@ -125,7 +179,8 @@ def note_arrays_to_note_sequence(
         program=program,
         is_drum=is_drum)
     ns.total_time = max(ns.total_time, offset_time)
-  assign_instruments(ns)
+    note_rhythms.append(bool(rhythm))
+  assign_instruments(ns, note_rhythms=note_rhythms)
   return ns
 
 
@@ -136,6 +191,8 @@ class NoteEventData:
   program: Optional[int] = None
   is_drum: Optional[bool] = None
   instrument: Optional[int] = None
+  # chordal-accompaniment flag; guitar-only, absent (None/False) elsewhere.
+  rhythm: Optional[bool] = None
 
 
 def note_sequence_to_onsets(
@@ -174,6 +231,18 @@ def note_sequence_to_onsets_and_offsets(
   return times, values
 
 
+def instrument_rhythms(
+    ns: note_seq.NoteSequence) -> MutableMapping[int, bool]:
+  """Map instrument index to its rhythm flag, read from `instrument_infos`.
+
+  `rhythm` has no field on the `Note` proto (see `assign_instruments`), so
+  this is how it is recovered: an instrument's canonical name carries a
+  `:rhythm` suffix exactly when its notes are chordal accompaniment.
+  """
+  return {info.instrument: info.name.strip().endswith(':rhythm')
+          for info in ns.instrument_infos}
+
+
 def note_sequence_to_onsets_and_offsets_and_programs(
     ns: note_seq.NoteSequence,
 ) -> Tuple[Sequence[float], Sequence[NoteEventData]]:
@@ -189,17 +258,25 @@ def note_sequence_to_onsets_and_offsets_and_programs(
     values: A list of NoteEventData objects where velocity is zero for note
         offsets.
   """
-  # Sort by program and pitch and put offsets before onsets as a tiebreaker for
-  # subsequent stable sort.
+  rhythm_by_instrument = instrument_rhythms(ns)
+  def rhythm(note) -> bool:
+    return rhythm_by_instrument.get(note.instrument, False)
+
+  # Sort by program, rhythm and pitch (and put offsets before onsets as a
+  # tiebreaker) so the token stream groups by state and does not thrash
+  # between flag values.
   notes = sorted(ns.notes,
-                 key=lambda note: (note.is_drum, note.program, note.pitch))
+                 key=lambda note: (note.is_drum, note.program, rhythm(note),
+                                   note.pitch))
   times = ([note.end_time for note in notes if not note.is_drum] +
            [note.start_time for note in notes])
   values = ([NoteEventData(pitch=note.pitch, velocity=0,
-                           program=note.program, is_drum=False)
+                           program=note.program, is_drum=False,
+                           rhythm=rhythm(note))
              for note in notes if not note.is_drum] +
             [NoteEventData(pitch=note.pitch, velocity=note.velocity,
-                           program=note.program, is_drum=note.is_drum)
+                           program=note.program, is_drum=note.is_drum,
+                           rhythm=False if note.is_drum else rhythm(note))
              for note in notes])
   return times, values
 
@@ -207,9 +284,9 @@ def note_sequence_to_onsets_and_offsets_and_programs(
 @dataclasses.dataclass
 class NoteEncodingState:
   """Encoding state for note transcription, keeping track of active pitches."""
-  # velocity bin for active pitches and programs
-  active_pitches: MutableMapping[Tuple[int, int], int] = dataclasses.field(
-      default_factory=dict)
+  # velocity bin for active (pitch, program, rhythm)
+  active_pitches: MutableMapping[Tuple[int, int, bool], int] = (
+      dataclasses.field(default_factory=dict))
 
 
 def note_event_data_to_events(
@@ -228,7 +305,7 @@ def note_event_data_to_events(
     if value.program is None:
       # onsets + offsets + velocities only, no programs
       if state is not None:
-        state.active_pitches[(value.pitch, 0)] = velocity_bin
+        state.active_pitches[(value.pitch, 0, False)] = velocity_bin
       return [event_codec.Event('velocity', velocity_bin),
               event_codec.Event('pitch', value.pitch)]
     else:
@@ -237,10 +314,13 @@ def note_event_data_to_events(
         return [event_codec.Event('velocity', velocity_bin),
                 event_codec.Event('drum', value.pitch)]
       else:
-        # program + velocity + pitch
+        # program + rhythm + velocity + pitch
+        rhythm = bool(value.rhythm)
         if state is not None:
-          state.active_pitches[(value.pitch, int(value.program))] = velocity_bin
+          state.active_pitches[
+              (value.pitch, int(value.program), rhythm)] = velocity_bin
         return [event_codec.Event('program', value.program),
+                event_codec.Event('rhythm', int(rhythm)),
                 event_codec.Event('velocity', velocity_bin),
                 event_codec.Event('pitch', value.pitch)]
 
@@ -248,12 +328,13 @@ def note_event_data_to_events(
 def note_encoding_state_to_events(
     state: NoteEncodingState
 ) -> Sequence[event_codec.Event]:
-  """Output program and pitch events for active notes plus a final tie event."""
+  """Output program, rhythm and pitch events for active notes, then a tie event."""
   events = []
-  for pitch, program in sorted(
-      state.active_pitches.keys(), key=lambda k: k[::-1]):
-    if state.active_pitches[(pitch, program)]:
+  for pitch, program, rhythm in sorted(
+      state.active_pitches.keys(), key=lambda k: (k[1], k[2], k[0])):
+    if state.active_pitches[(pitch, program, rhythm)]:
       events += [event_codec.Event('program', program),
+                 event_codec.Event('rhythm', int(rhythm)),
                  event_codec.Event('pitch', pitch)]
   events.append(event_codec.Event('tie', 0))
   return events
@@ -267,18 +348,23 @@ class NoteDecodingState:
   current_velocity: int = DEFAULT_VELOCITY
   # program to apply to subsequent pitch events
   current_program: int = 0
-  # onset time and velocity for active pitches and programs
-  active_pitches: MutableMapping[Tuple[int, int],
+  # rhythm flag to apply to subsequent pitch events
+  current_rhythm: bool = False
+  # onset time and velocity for active pitches, programs and rhythm flags
+  active_pitches: MutableMapping[Tuple[int, int, bool],
                                  Tuple[float, int]] = dataclasses.field(
                                      default_factory=dict)
-  # pitches (with programs) to continue from previous segment
-  tied_pitches: MutableSet[Tuple[int, int]] = dataclasses.field(
+  # pitches (with programs and rhythm flags) to continue from previous segment
+  tied_pitches: MutableSet[Tuple[int, int, bool]] = dataclasses.field(
       default_factory=set)
   # whether or not we are in the tie section at the beginning of a segment
   is_tie_section: bool = False
   # partially-decoded NoteSequence
   note_sequence: note_seq.NoteSequence = dataclasses.field(
       default_factory=lambda: note_seq.NoteSequence(ticks_per_quarter=220))
+  # rhythm flag for each note added to `note_sequence`, in order; the carrier
+  # `assign_instruments` needs since notes added here have no rhythm field
+  note_rhythms: List[bool] = dataclasses.field(default_factory=list)
 
 
 def decode_note_onset_event(
@@ -294,20 +380,23 @@ def decode_note_onset_event(
         pitch=event.value, velocity=DEFAULT_VELOCITY)
     state.note_sequence.total_time = max(state.note_sequence.total_time,
                                          time + DEFAULT_NOTE_DURATION)
+    state.note_rhythms.append(False)
   else:
     raise ValueError('unexpected event type: %s' % event.type)
 
 
 def _add_note_to_sequence(
-    ns: note_seq.NoteSequence,
+    state: NoteDecodingState,
     start_time: float, end_time: float, pitch: int, velocity: int,
-    program: int = 0, is_drum: bool = False
+    program: int = 0, is_drum: bool = False, rhythm: bool = False
 ) -> None:
   end_time = max(end_time, start_time + MIN_NOTE_DURATION)
-  ns.notes.add(
+  state.note_sequence.notes.add(
       start_time=start_time, end_time=end_time,
       pitch=pitch, velocity=velocity, program=program, is_drum=is_drum)
-  ns.total_time = max(ns.total_time, end_time)
+  state.note_sequence.total_time = max(state.note_sequence.total_time,
+                                       end_time)
+  state.note_rhythms.append(rhythm)
 
 
 def decode_note_event(
@@ -323,45 +412,47 @@ def decode_note_event(
   state.current_time = time
   if event.type == 'pitch':
     pitch = event.value
+    key = (pitch, state.current_program, state.current_rhythm)
     if state.is_tie_section:
       # "tied" pitch
-      if (pitch, state.current_program) not in state.active_pitches:
-        raise ValueError('inactive pitch/program in tie section: %d/%d' %
-                         (pitch, state.current_program))
-      if (pitch, state.current_program) in state.tied_pitches:
-        raise ValueError('pitch/program is already tied: %d/%d' %
-                         (pitch, state.current_program))
-      state.tied_pitches.add((pitch, state.current_program))
+      if key not in state.active_pitches:
+        raise ValueError(
+            'inactive pitch/program/rhythm in tie section: %d/%d/%d' %
+            (pitch, state.current_program, state.current_rhythm))
+      if key in state.tied_pitches:
+        raise ValueError('pitch/program/rhythm is already tied: %d/%d/%d' %
+                         (pitch, state.current_program, state.current_rhythm))
+      state.tied_pitches.add(key)
     elif state.current_velocity == 0:
       # note offset
-      if (pitch, state.current_program) not in state.active_pitches:
-        raise ValueError('note-off for inactive pitch/program: %d/%d' %
-                         (pitch, state.current_program))
-      onset_time, onset_velocity = state.active_pitches.pop(
-          (pitch, state.current_program))
+      if key not in state.active_pitches:
+        raise ValueError(
+            'note-off for inactive pitch/program/rhythm: %d/%d/%d' %
+            (pitch, state.current_program, state.current_rhythm))
+      onset_time, onset_velocity = state.active_pitches.pop(key)
       _add_note_to_sequence(
-          state.note_sequence, start_time=onset_time, end_time=time,
-          pitch=pitch, velocity=onset_velocity, program=state.current_program)
+          state, start_time=onset_time, end_time=time,
+          pitch=pitch, velocity=onset_velocity, program=state.current_program,
+          rhythm=state.current_rhythm)
     else:
       # note onset
-      if (pitch, state.current_program) in state.active_pitches:
+      if key in state.active_pitches:
         # The pitch is already active; this shouldn't really happen but we'll
         # try to handle it gracefully by ending the previous note and starting a
         # new one.
-        onset_time, onset_velocity = state.active_pitches.pop(
-            (pitch, state.current_program))
+        onset_time, onset_velocity = state.active_pitches.pop(key)
         _add_note_to_sequence(
-            state.note_sequence, start_time=onset_time, end_time=time,
-            pitch=pitch, velocity=onset_velocity, program=state.current_program)
-      state.active_pitches[(pitch, state.current_program)] = (
-          time, state.current_velocity)
+            state, start_time=onset_time, end_time=time,
+            pitch=pitch, velocity=onset_velocity,
+            program=state.current_program, rhythm=state.current_rhythm)
+      state.active_pitches[key] = (time, state.current_velocity)
   elif event.type == 'drum':
     # drum onset (drums have no offset)
     if state.current_velocity == 0:
       raise ValueError('velocity cannot be zero for drum event')
     offset_time = time + DEFAULT_NOTE_DURATION
     _add_note_to_sequence(
-        state.note_sequence, start_time=time, end_time=offset_time,
+        state, start_time=time, end_time=offset_time,
         pitch=event.value, velocity=state.current_velocity, is_drum=True)
   elif event.type == 'velocity':
     # velocity change
@@ -371,17 +462,22 @@ def decode_note_event(
   elif event.type == 'program':
     # program change
     state.current_program = event.value
+  elif event.type == 'rhythm':
+    # rhythm flag change
+    state.current_rhythm = bool(event.value)
   elif event.type == 'tie':
     # end of tie section; end active notes that weren't declared tied
     if not state.is_tie_section:
       raise ValueError('tie section end event when not in tie section')
-    for (pitch, program) in list(state.active_pitches.keys()):
-      if (pitch, program) not in state.tied_pitches:
-        onset_time, onset_velocity = state.active_pitches.pop((pitch, program))
+    for (pitch, program, rhythm) in list(state.active_pitches.keys()):
+      if (pitch, program, rhythm) not in state.tied_pitches:
+        onset_time, onset_velocity = state.active_pitches.pop(
+            (pitch, program, rhythm))
         _add_note_to_sequence(
-            state.note_sequence,
+            state,
             start_time=onset_time, end_time=state.current_time,
-            pitch=pitch, velocity=onset_velocity, program=program)
+            pitch=pitch, velocity=onset_velocity, program=program,
+            rhythm=rhythm)
     state.is_tie_section = False
   else:
     raise ValueError('unexpected event type: %s' % event.type)
@@ -399,12 +495,13 @@ def flush_note_decoding_state(
   """End all active notes and return resulting NoteSequence."""
   for onset_time, _ in state.active_pitches.values():
     state.current_time = max(state.current_time, onset_time + MIN_NOTE_DURATION)
-  for (pitch, program) in list(state.active_pitches.keys()):
-    onset_time, onset_velocity = state.active_pitches.pop((pitch, program))
+  for (pitch, program, rhythm) in list(state.active_pitches.keys()):
+    onset_time, onset_velocity = state.active_pitches.pop(
+        (pitch, program, rhythm))
     _add_note_to_sequence(
-        state.note_sequence, start_time=onset_time, end_time=state.current_time,
-        pitch=pitch, velocity=onset_velocity, program=program)
-  assign_instruments(state.note_sequence)
+        state, start_time=onset_time, end_time=state.current_time,
+        pitch=pitch, velocity=onset_velocity, program=program, rhythm=rhythm)
+  assign_instruments(state.note_sequence, note_rhythms=state.note_rhythms)
   return state.note_sequence
 
 

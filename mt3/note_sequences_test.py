@@ -33,7 +33,8 @@ codec = event_codec.Codec(
                                note_seq.MAX_MIDI_PITCH),
         event_codec.EventRange('program', note_seq.MIN_MIDI_PROGRAM,
                                note_seq.MAX_MIDI_PROGRAM),
-        event_codec.EventRange('tie', 0, 0)
+        event_codec.EventRange('tie', 0, 0),
+        event_codec.EventRange('rhythm', 0, 1),
     ])
 
 
@@ -194,21 +195,21 @@ class RunLengthEncodingTest(tf.test.TestCase):
     self.assertEqual(len(frame_times), len(event_start_indices))
     self.assertEqual(len(frame_times), len(event_end_indices))
     self.assertEqual(len(frame_times), len(state_event_indices))
-    self.assertLen(tokens, 414)
+    self.assertLen(tokens, 418)
 
     expected_events = (
         [event_codec.Event('velocity', 127), event_codec.Event('drum', 37)] +
         [event_codec.Event('shift', 1)] * 100 +
-        [event_codec.Event('program', 0),
+        [event_codec.Event('program', 0), event_codec.Event('rhythm', 0),
          event_codec.Event('velocity', 127), event_codec.Event('pitch', 61)] +
         [event_codec.Event('shift', 1)] * 100 +
-        [event_codec.Event('program', 40),
+        [event_codec.Event('program', 40), event_codec.Event('rhythm', 0),
          event_codec.Event('velocity', 127), event_codec.Event('pitch', 62)] +
         [event_codec.Event('shift', 1)] * 100 +
-        [event_codec.Event('program', 0),
+        [event_codec.Event('program', 0), event_codec.Event('rhythm', 0),
          event_codec.Event('velocity', 0), event_codec.Event('pitch', 61)] +
         [event_codec.Event('shift', 1)] * 100 +
-        [event_codec.Event('program', 40),
+        [event_codec.Event('program', 40), event_codec.Event('rhythm', 0),
          event_codec.Event('velocity', 0), event_codec.Event('pitch', 62)])
     expected_tokens = [codec.encode_event(e) for e in expected_events]
     np.testing.assert_array_equal(expected_tokens, tokens)
@@ -217,14 +218,18 @@ class RunLengthEncodingTest(tf.test.TestCase):
         event_codec.Event('tie', 0),       # state prior to first drum
         event_codec.Event('tie', 0),       # state prior to first onset
         event_codec.Event('program', 0),   # state prior to second onset
+        event_codec.Event('rhythm', 0),    # |
         event_codec.Event('pitch', 61),    # |
         event_codec.Event('tie', 0),       # |
         event_codec.Event('program', 0),   # state prior to first offset
+        event_codec.Event('rhythm', 0),    # |
         event_codec.Event('pitch', 61),    # |
         event_codec.Event('program', 40),  # |
+        event_codec.Event('rhythm', 0),    # |
         event_codec.Event('pitch', 62),    # |
         event_codec.Event('tie', 0),       # |
         event_codec.Event('program', 40),  # state prior to second offset
+        event_codec.Event('rhythm', 0),    # |
         event_codec.Event('pitch', 62),    # |
         event_codec.Event('tie', 0)        # |
     ]
@@ -242,19 +247,19 @@ class RunLengthEncodingTest(tf.test.TestCase):
     self.assertEqual(state_event_indices[1000], 1)
 
     self.assertEqual(2.0, frame_times[2000])
-    self.assertEqual(event_start_indices[2000], 205)
-    self.assertEqual(event_end_indices[2000], 205)
+    self.assertEqual(event_start_indices[2000], 206)
+    self.assertEqual(event_end_indices[2000], 206)
     self.assertEqual(state_event_indices[2000], 2)
 
     self.assertEqual(3.0, frame_times[3000])
-    self.assertEqual(event_start_indices[3000], 308)
-    self.assertEqual(event_end_indices[3000], 308)
-    self.assertEqual(state_event_indices[3000], 5)
+    self.assertEqual(event_start_indices[3000], 310)
+    self.assertEqual(event_end_indices[3000], 310)
+    self.assertEqual(state_event_indices[3000], 6)
 
     self.assertEqual(3.999, frame_times[-1])
-    self.assertEqual(event_start_indices[-1], 410)
+    self.assertEqual(event_start_indices[-1], 413)
     self.assertEqual(event_end_indices[-1], len(expected_events))
-    self.assertEqual(state_event_indices[-1], 10)
+    self.assertEqual(state_event_indices[-1], 13)
 
   def test_encode_and_index_note_sequence_last_token_alignment(self):
     ns = note_seq.NoteSequence()
@@ -309,6 +314,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=0.50,
         end_time=0.51)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.51
     self.assertProtoEquals(expected_ns, ns)
 
@@ -334,6 +340,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=0.25,
         end_time=0.26)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.26
     self.assertProtoEquals(expected_ns, ns)
 
@@ -354,6 +361,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=127,
         start_time=0.05,
         end_time=0.25)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.25
     self.assertProtoEquals(expected_ns, ns)
 
@@ -379,6 +387,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=127,
         start_time=0.10,
         end_time=0.25)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.25
     self.assertProtoEquals(expected_ns, ns)
 
@@ -407,6 +416,8 @@ class RunLengthEncodingTest(tf.test.TestCase):
         start_time=0.05,
         end_time=0.25,
         program=40)
+    expected_ns.instrument_infos.add(instrument=9, name='drums')
+    expected_ns.instrument_infos.add(instrument=0, name='violin')
     expected_ns.total_time = 0.25
     self.assertProtoEquals(expected_ns, ns)
 
@@ -432,6 +443,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=0.25,
         end_time=0.26)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.26
     self.assertProtoEquals(expected_ns, ns)
 
@@ -457,6 +469,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=1.25,
         end_time=1.26)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 1.26
     self.assertProtoEquals(expected_ns, ns)
 
@@ -477,6 +490,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=1.05,
         end_time=1.06)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 1.06
     self.assertProtoEquals(expected_ns, ns)
 
@@ -497,6 +511,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
         velocity=100,
         start_time=0.50,
         end_time=0.51)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 0.51
     self.assertProtoEquals(expected_ns, ns)
 

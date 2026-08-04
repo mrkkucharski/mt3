@@ -29,6 +29,7 @@ dependencies = [
   "t5x",
   "tensorflow",
   "tensorflow-datasets",
+  "pyfluidsynth>=1.4.0",
 ]
 
 [project.scripts]

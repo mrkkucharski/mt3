@@ -110,6 +110,7 @@ class MetricsUtilsTest(tf.test.TestCase):
         velocity=63,
         start_time=0.60,
         end_time=1.00)
+    expected_ns.instrument_infos.add(name='acoustic-grand-piano')
     expected_ns.total_time = 1.00
 
     codec = event_codec.Codec(
@@ -159,6 +160,8 @@ class MetricsUtilsTest(tf.test.TestCase):
         start_time=0.20,
         end_time=1.00,
         program=32)
+    expected_ns.instrument_infos.add(instrument=9, name='drums')
+    expected_ns.instrument_infos.add(instrument=0, name='acoustic-bass')
     expected_ns.total_time = 1.00
 
     codec = event_codec.Codec(
@@ -214,6 +217,8 @@ class MetricsUtilsTest(tf.test.TestCase):
         start_time=0.20,
         end_time=0.80,
         program=32)
+    expected_ns.instrument_infos.add(instrument=9, name='drums')
+    expected_ns.instrument_infos.add(instrument=0, name='acoustic-bass')
     expected_ns.total_time = 0.80
 
     codec = event_codec.Codec(

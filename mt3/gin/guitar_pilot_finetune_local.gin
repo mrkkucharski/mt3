@@ -1,0 +1,53 @@
+# Phase 0 gate, second half (MT3_guitar_transcription_plan.md): restore the
+# real 46M-parameter official MT3 checkpoint into the rhythm-extended codec
+# and complete one full-size forward/backward/save/resume cycle. The tiny
+# checkpoint used by the overfit gate (guitar_pilot_gate_local.gin) is not
+# treated as compatible with the production model -- this must be checked
+# against the genuine checkpoint.
+#
+# This is a preflight, not a training run: TRAIN_STEPS=1. Uses the real
+# guitar_pilot corpus (data/pilot) and the full T5.1.1 Small architecture
+# from model.gin -- no tiny-network override.
+#
+# Load after train.gin and model.gin:
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/train.gin
+#   --gin_file=mt3/gin/guitar_pilot_finetune_local.gin
+
+from __gin__ import dynamic_registration
+
+import __main__ as train_script
+from mt3 import local_training
+from t5x import utils
+
+TASK_PREFIX = 'guitar_pilot_notes_ties'
+NUM_VELOCITY_BINS = 1
+PROGRAM_GRANULARITY = 'full'
+USE_CACHED_TASKS = False
+
+# Orbax on this local stack requires an absolute checkpoint path.
+MODEL_DIR = '/Users/marek/projects/transcription/runs/guitar_pilot_finetune_preflight_v1'
+CHECKPOINT_PATH = '/Users/marek/projects/transcription/model/mt3/checkpoint_0'
+TASK_FEATURE_LENGTHS = {'inputs': 256, 'targets': 1024}
+# The official checkpoint restores at step 1,000,000. TRAIN_STEPS is an
+# ABSOLUTE step target in train.gin, which would be already-past and skip
+# training entirely; relative_steps=1 takes exactly one step from wherever
+# restore lands, regardless of its absolute step number.
+TRAIN_STEPS = 1
+train_script.train.relative_steps = 1
+EVAL_STEPS = 1
+BATCH_SIZE = 1
+
+utils.CheckpointConfig.restore = @local_training.restore_checkpoint_config()
+local_training.restore_checkpoint_config:
+  path = %CHECKPOINT_PATH
+  mode = 'specific'
+  dtype = 'float32'
+
+# Save every step so the single optimizer step actually produces a
+# checkpoint to resume from (must divide the default eval_period, 5000).
+utils.SaveCheckpointConfig.period = 1
+
+train/utils.DatasetConfig.batch_size = %BATCH_SIZE
+train_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
+infer_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE

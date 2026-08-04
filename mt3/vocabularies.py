@@ -75,9 +75,16 @@ def bin_to_velocity(velocity_bin, num_velocity_bins):
 
 
 def drop_programs(tokens, codec: event_codec.Codec):
-  """Drops program change events from a token sequence."""
+  """Drops program and rhythm change events from a token sequence.
+
+  `rhythm` is meaningless without the `program` state it qualifies, so the
+  'flat' granularity (a single merged, program-agnostic track) drops both.
+  """
   min_program_id, max_program_id = codec.event_type_range('program')
-  return tokens[(tokens < min_program_id) | (tokens > max_program_id)]
+  min_rhythm_id, max_rhythm_id = codec.event_type_range('rhythm')
+  is_program = (tokens >= min_program_id) & (tokens <= max_program_id)
+  is_rhythm = (tokens >= min_rhythm_id) & (tokens <= max_rhythm_id)
+  return tokens[~(is_program | is_rhythm)]
 
 
 def programs_to_midi_classes(tokens, codec):
@@ -92,9 +99,12 @@ def programs_to_midi_classes(tokens, codec):
 
 @dataclasses.dataclass
 class ProgramGranularity:
-  # both tokens_map_fn and program_map_fn should be idempotent
+  # tokens_map_fn, program_map_fn and rhythm_map_fn should all be idempotent
   tokens_map_fn: Callable[[Sequence[int], event_codec.Codec], Sequence[int]]
   program_map_fn: Callable[[int], int]
+  # scoring-time rhythm collapse; 'flat' merges into one program-blind track,
+  # so rhythm (an instrument-level distinction) is meaningless there too.
+  rhythm_map_fn: Callable[[bool], bool] = lambda rhythm: rhythm
 
 
 PROGRAM_GRANULARITIES = {
@@ -102,7 +112,8 @@ PROGRAM_GRANULARITIES = {
     # programs to zero
     'flat': ProgramGranularity(
         tokens_map_fn=drop_programs,
-        program_map_fn=lambda program: 0),
+        program_map_fn=lambda program: 0,
+        rhythm_map_fn=lambda rhythm: False),
 
     # map each program to the first program in its MIDI class
     'midi_class': ProgramGranularity(
@@ -131,6 +142,9 @@ def build_codec(vocab_config: VocabularyConfig):
                              note_seq.MAX_MIDI_PROGRAM),
       event_codec.EventRange('drum', note_seq.MIN_MIDI_PITCH,
                              note_seq.MAX_MIDI_PITCH),
+      # a state-setting flag, encoded like `program`: applies to every
+      # subsequent pitch event until changed. 0 = not rhythm, 1 = rhythm.
+      event_codec.EventRange('rhythm', 0, 1),
   ]
 
   return event_codec.Codec(

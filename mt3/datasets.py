@@ -138,6 +138,30 @@ GUITARSET_CONFIG = DatasetConfig(
     ])
 
 
+
+# Guitar-anchored multi-instrument pilot corpus (DATA_CONTRACT.md). Paths are
+# relative to the MT3 fork; run training and inspection commands from that
+# repository directory, or (on Modal) mount the data volume at
+# /workspace/data with /workspace/mt3 as the working directory. TFRecords are
+# built by mt3.scripts.build_guitar_pilot_tfrecord from ../data/pilot.
+GUITAR_PILOT_CONFIG = DatasetConfig(
+    name='guitar_pilot',
+    paths={
+        'train': '../data/pilot/tfrecord/train.tfrecord',
+        'test': '../data/pilot/tfrecord/test.tfrecord',
+    },
+    features={
+        'audio': tf.io.FixedLenFeature([], dtype=tf.string),
+        'sequence': tf.io.FixedLenFeature([], dtype=tf.string),
+        'id': tf.io.FixedLenFeature([], dtype=tf.string),
+    },
+    train_split='train',
+    train_eval_split='test',
+    infer_eval_splits=[
+        InferEvalSplit(name='test', suffix='eval_test'),
+    ])
+
+
 URMP_CONFIG = DatasetConfig(
     name='urmp',
     paths={

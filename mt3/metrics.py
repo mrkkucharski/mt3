@@ -41,7 +41,11 @@ def _program_aware_note_scores(
   """Compute precision/recall/F1 for notes taking program into account.
 
   For non-drum tracks, uses onsets and offsets. For drum tracks, uses onsets
-  only. Applies MIDI program map of specified granularity type.
+  only. Applies MIDI program map of specified granularity type. Non-drum
+  tracks are also split by `rhythm` (read from `instrument_infos`, since
+  remapping `program` for granularity doesn't touch `instrument`), so a
+  `midi_class` score — where guitar programs collapse to one class — still
+  reflects whether the model gets the rhythm/lead distinction right.
 
   Args:
     ref_ns: Reference NoteSequence with ground truth labels.
@@ -51,22 +55,30 @@ def _program_aware_note_scores(
   Returns:
     A dictionary containing precision, recall, and F1 score.
   """
-  program_map_fn = vocabularies.PROGRAM_GRANULARITIES[
-      granularity_type].program_map_fn
+  granularity = vocabularies.PROGRAM_GRANULARITIES[granularity_type]
+  program_map_fn = granularity.program_map_fn
+  rhythm_map_fn = granularity.rhythm_map_fn
 
   ref_ns = copy.deepcopy(ref_ns)
+  ref_rhythms = note_sequences.instrument_rhythms(ref_ns)
   for note in ref_ns.notes:
     if not note.is_drum:
       note.program = program_map_fn(note.program)
 
   est_ns = copy.deepcopy(est_ns)
+  est_rhythms = note_sequences.instrument_rhythms(est_ns)
   for note in est_ns.notes:
     if not note.is_drum:
       note.program = program_map_fn(note.program)
 
+  def _key(note, rhythms):
+    rhythm = (False if note.is_drum
+             else rhythm_map_fn(rhythms.get(note.instrument, False)))
+    return (note.program, rhythm, note.is_drum)
+
   program_and_is_drum_tuples = (
-      set((note.program, note.is_drum) for note in ref_ns.notes) |
-      set((note.program, note.is_drum) for note in est_ns.notes)
+      set(_key(note, ref_rhythms) for note in ref_ns.notes) |
+      set(_key(note, est_rhythms) for note in est_ns.notes)
   )
 
   drum_precision_sum = 0.0
@@ -79,9 +91,13 @@ def _program_aware_note_scores(
   nondrum_recall_sum = 0.0
   nondrum_recall_count = 0
 
-  for program, is_drum in program_and_is_drum_tuples:
-    est_track = note_sequences.extract_track(est_ns, program, is_drum)
-    ref_track = note_sequences.extract_track(ref_ns, program, is_drum)
+  for program, rhythm, is_drum in program_and_is_drum_tuples:
+    est_track = note_sequences.extract_track(
+        est_ns, program, is_drum, rhythm=None if is_drum else rhythm,
+        rhythm_map_fn=rhythm_map_fn)
+    ref_track = note_sequences.extract_track(
+        ref_ns, program, is_drum, rhythm=None if is_drum else rhythm,
+        rhythm_map_fn=rhythm_map_fn)
 
     est_intervals, est_pitches, unused_est_velocities = (
         note_seq.sequences_lib.sequence_to_valued_intervals(est_track))
@@ -245,9 +261,9 @@ def transcription_metrics(
       # Compute transcription metrics separately for each track.
       for spec in track_specs:
         est_tracks.append(note_sequences.extract_track(
-            prediction['est_ns'], spec.program, spec.is_drum))
+            prediction['est_ns'], spec.program, spec.is_drum, spec.rhythm))
         ref_tracks.append(note_sequences.extract_track(
-            target['ref_ns'], spec.program, spec.is_drum))
+            target['ref_ns'], spec.program, spec.is_drum, spec.rhythm))
         use_track_offsets.append(not onsets_only and not spec.is_drum)
         use_track_velocities.append(not onsets_only)
         track_instrument_names.append(spec.name)
