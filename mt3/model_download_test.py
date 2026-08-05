@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for model_download.rebuild_checkpoint_0_view."""
+"""Tests for model_download."""
 
 from pathlib import Path
+
+import pytest
 
 from mt3 import model_download
 
@@ -61,3 +63,45 @@ def test_rebuild_does_not_recurse_into_checkpoint_0_itself(tmp_path):
   checkpoint_dir = model_download.rebuild_checkpoint_0_view(model_dir)
 
   assert not (checkpoint_dir / 'checkpoint_0').exists()
+
+
+def _fake_snapshot_download(files: dict[str, bytes]):
+  def _fake(*, repo_id, revision, allow_patterns, local_dir):
+    del repo_id, revision, allow_patterns  # unused by the fake
+    for relative_path, contents in files.items():
+      destination = Path(local_dir) / model_download.HF_CHECKPOINT_DIR / relative_path
+      destination.parent.mkdir(parents=True, exist_ok=True)
+      destination.write_bytes(contents)
+    return local_dir
+  return _fake
+
+
+def test_download_model_renames_checkpoint_step_dir_to_checkpoint_0(tmp_path, monkeypatch):
+  monkeypatch.setattr(
+      model_download, 'snapshot_download',
+      _fake_snapshot_download({'manifest.ocdbt': b'ocdbt-bytes'}))
+  output_dir = tmp_path / 'models'
+
+  checkpoint_dir = model_download.download_model(output_dir)
+
+  assert checkpoint_dir == output_dir / 'checkpoint_0'
+  assert (checkpoint_dir / 'manifest.ocdbt').read_bytes() == b'ocdbt-bytes'
+
+
+def test_download_model_is_idempotent(tmp_path, monkeypatch):
+  monkeypatch.setattr(
+      model_download, 'snapshot_download',
+      _fake_snapshot_download({'manifest.ocdbt': b'ocdbt-bytes'}))
+  output_dir = tmp_path / 'models'
+
+  model_download.download_model(output_dir)
+  checkpoint_dir = model_download.download_model(output_dir)
+
+  assert (checkpoint_dir / 'manifest.ocdbt').read_bytes() == b'ocdbt-bytes'
+
+
+def test_download_model_raises_if_checkpoint_step_dir_missing(tmp_path, monkeypatch):
+  monkeypatch.setattr(model_download, 'snapshot_download', _fake_snapshot_download({}))
+
+  with pytest.raises(RuntimeError, match=model_download.HF_CHECKPOINT_DIR):
+    model_download.download_model(tmp_path / 'models')

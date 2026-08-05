@@ -13,6 +13,7 @@ dependencies = [
   "absl-py",
   "flax",
   "gin-config",
+  "huggingface-hub>=0.26",
   "immutabledict",
   "librosa",
   "mir-eval",
