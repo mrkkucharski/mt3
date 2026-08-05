@@ -132,8 +132,30 @@ class Transcriber:
         in_axis_resources=(train_state_axes.params,
                            partitioning.PartitionSpec('data',), None),
         out_axis_resources=partitioning.PartitionSpec('data',))
-    self._train_state = initializer.from_checkpoint_or_scratch(
-        [restore_config], init_rng=jax.random.PRNGKey(0))
+    # NOT initializer.from_checkpoint_or_scratch: it calls
+    # checkpoints.Checkpointer.restore(path=...) directly, the *non*-Orbax
+    # legacy branch, which expects a flat 'checkpoint' file and cannot read
+    # the Orbax-native (OCDBT) layout t5x.train itself writes -- so this
+    # loaded the official released checkpoint fine but broke on any
+    # self-trained checkpoint from this fork's own training pipeline.
+    # t5x.train() defaults to use_orbax=True and resumes through
+    # create_checkpoint_manager_and_restore's Orbax branch, which reads
+    # both layouts correctly; mirror that here (same fix already applied
+    # to mt3/scripts/run_phase0_gate_eval.py's GateTranscriber).
+    valid_restore_cfg, restore_paths = (
+        utils.get_first_valid_restore_config_and_paths([restore_config]))
+    train_state, _ = utils.create_checkpoint_manager_and_restore(
+        train_state_initializer=initializer,
+        partitioner=self.partitioner,
+        restore_checkpoint_cfg=valid_restore_cfg,
+        restore_path=restore_paths[0] if restore_paths else None,
+        fallback_init_rng=jax.random.PRNGKey(0),
+        save_checkpoint_cfg=None,
+        model_dir=str(self.checkpoint_path),
+        ds_iter=None,
+        use_orbax=True)
+    self._train_state = train_state or initializer.from_scratch(
+        jax.random.PRNGKey(0))
 
   def _dataset(self, audio: np.ndarray) -> tf.data.Dataset:
     hop = self.spectrogram_config.hop_width

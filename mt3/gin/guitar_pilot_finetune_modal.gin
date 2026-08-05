@@ -1,0 +1,59 @@
+# Modal training entrypoint (MODAL_TRAINING_SETUP_PLAN.md): restore the real
+# 46M-parameter official MT3 checkpoint into the rhythm-extended codec and
+# fine-tune on the guitar_pilot corpus, using the full T5.1.1 Small
+# architecture and Modal's mounted volume paths.
+#
+# `train_script.train.relative_steps` (an actual int step COUNT, not a
+# boolean "interpret as relative" flag -- see t5x/train.py's `train()`:
+# `if relative_steps: total_steps = host_step + relative_steps`, which
+# unconditionally overrides TRAIN_STEPS/total_steps whenever it's set) must
+# be supplied per invocation, e.g. --gin.train_script.train.relative_steps=1
+# for the preflight (step 8) or =100 for the first pilot leg (step 9). This
+# was learned the hard way: an earlier version of this file hardcoded
+# relative_steps=1 here (copied from guitar_pilot_finetune_local.gin, whose
+# own TRAIN_STEPS also happened to be 1, hiding the bug) while leaving
+# TRAIN_STEPS as a per-invocation CLI override -- every "N-step" run
+# silently took exactly 1 step regardless of N, because relative_steps
+# clobbered whatever TRAIN_STEPS had computed. TRAIN_STEPS itself is fixed
+# below purely to satisfy train.gin's `%gin.REQUIRED`; it is not load-
+# bearing once relative_steps is supplied. relative_steps must be a step
+# delta at all (not an absolute target) because the official checkpoint
+# restores at step 1,000,000, which an absolute TRAIN_STEPS would already
+# be in the past of.
+#
+# Load after train.gin and model.gin:
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/train.gin
+#   --gin_file=mt3/gin/guitar_pilot_finetune_modal.gin
+
+from __gin__ import dynamic_registration
+
+import __main__ as train_script
+from mt3 import local_training
+from t5x import utils
+
+TASK_PREFIX = 'guitar_pilot_notes_ties'
+NUM_VELOCITY_BINS = 1
+PROGRAM_GRANULARITY = 'full'
+USE_CACHED_TASKS = False
+
+MODEL_DIR = '/workspace/runs/guitar_pilot_finetune_v1'
+CHECKPOINT_PATH = '/workspace/model/mt3/checkpoint_0'
+TASK_FEATURE_LENGTHS = {'inputs': 256, 'targets': 1024}
+BATCH_SIZE = 1
+TRAIN_STEPS = 1  # inert once --gin.train_script.train.relative_steps=<n> is passed
+
+utils.CheckpointConfig.restore = @local_training.restore_checkpoint_config()
+local_training.restore_checkpoint_config:
+  path = %CHECKPOINT_PATH
+  mode = 'specific'
+  dtype = 'float32'
+
+# Every 25 steps (MODAL_TRAINING_SETUP_PLAN.md step 9). T5X always saves a
+# checkpoint at the end of a run regardless of period, so a 1-step
+# preflight (step 8) still produces one to resume from.
+utils.SaveCheckpointConfig.period = 25
+
+train/utils.DatasetConfig.batch_size = %BATCH_SIZE
+train_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
+infer_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE

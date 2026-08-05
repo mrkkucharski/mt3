@@ -77,14 +77,48 @@ def download_model(output_dir: Path) -> Path:
   return checkpoint_dir
 
 
+def rebuild_checkpoint_0_view(model_dir: Path) -> Path:
+  """Rebuilds the legacy-checkpoint compatibility view under ``checkpoint_0``.
+
+  An earlier downloader version wrote the checkpoint's flat files (the
+  `checkpoint` index and one directory per variable) straight into
+  ``model_dir`` instead of ``model_dir/checkpoint_0``; every documented
+  ``--checkpoint .../checkpoint_0`` invocation expects the latter. Rather
+  than re-download, this recreates ``checkpoint_0`` as a directory of
+  symlinks back to those flat files, matching what the local Mac checkpoint
+  directory already has by hand. It is idempotent and safe to call
+  unconditionally: a volume upload (e.g. onto Modal) may not carry relative
+  symlinks faithfully, so callers should rebuild this view themselves after
+  mounting rather than trust whatever came over the wire.
+  """
+  model_dir = model_dir.expanduser().resolve()
+  checkpoint_dir = model_dir / 'checkpoint_0'
+  checkpoint_dir.mkdir(exist_ok=True)
+  for entry in model_dir.iterdir():
+    if entry.name == 'checkpoint_0':
+      continue
+    link = checkpoint_dir / entry.name
+    if link.is_symlink() or link.exists():
+      link.unlink()
+    link.symlink_to(Path('..') / entry.name, target_is_directory=entry.is_dir())
+  return checkpoint_dir
+
+
 def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('--model', choices=[MODEL_ID], default=MODEL_ID)
-  parser.add_argument('--output-dir', type=Path, required=True,
+  parser.add_argument('--output-dir', type=Path,
                       help='Directory that will contain checkpoint_0.')
   parser.add_argument('--json', action='store_true', help='Write the checkpoint path as JSON.')
+  parser.add_argument('--rebuild-checkpoint-0-view', type=Path, default=None,
+                      help='Skip downloading; only rebuild checkpoint_0 under this directory.')
   args = parser.parse_args(argv)
-  checkpoint = download_model(args.output_dir)
+  if args.rebuild_checkpoint_0_view is not None:
+    checkpoint = rebuild_checkpoint_0_view(args.rebuild_checkpoint_0_view)
+  else:
+    if args.output_dir is None:
+      parser.error('--output-dir is required unless --rebuild-checkpoint-0-view is given.')
+    checkpoint = download_model(args.output_dir)
   if args.json:
     print(json.dumps({'model': args.model, 'checkpoint': str(checkpoint)}, sort_keys=True))
   else:
