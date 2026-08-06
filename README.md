@@ -92,6 +92,34 @@ uv run mt3-transcribe \
 This command retains MT3's complete multi-instrument prediction, including all
 predicted MIDI programs and drums.
 
+### Evaluate a checkpoint against a held-out split
+
+```sh
+uv run mt3-evaluate \
+  --checkpoint runs/guitar_pilot_v1/checkpoint_1002000 \
+  --dataset ../data/pilot --split test \
+  --report ../runs/eval_reports/checkpoint_1002000.json
+```
+
+Transcribes every example in the split and scores it against its corpus MIDI
+with the same (program, rhythm)-aware onset+offset F1
+(`mt3.scripts.run_phase0_gate_eval` uses for the Phase 0 tiny-model gate)
+applied here to a real checkpoint and a real held-out split, instead of
+transcribing by hand and eyeballing note counts.
+
+### Export a transcription as a reviewable REAPER project
+
+```sh
+uv run mt3-export \
+  --checkpoint runs/guitar_pilot_v1/checkpoint_1002000 \
+  --input ../reaper/instrumental.wav \
+  --out-dir ../runs/instrumental_transcriptions
+```
+
+Fuses `mt3-transcribe` and `midi2reaper build` (checked out as a sibling
+directory) into one step: transcribes the WAV, then builds a REAPER project
+from the result so it's ready to open and listen to.
+
 ## Transcribe your own audio
 
 Use our [colab notebook](https://colab.research.google.com/github/magenta/mt3/blob/main/mt3/colab/music_transcription_with_transformers.ipynb) to

@@ -36,6 +36,8 @@ dependencies = [
 [project.scripts]
 mt3-transcribe = "mt3.cli:main"
 mt3-download-model = "mt3.model_download:main"
+mt3-evaluate = "mt3.scripts.evaluate_checkpoint:main"
+mt3-export = "mt3.scripts.export_transcription:main"
 
 [dependency-groups]
 dev = [
