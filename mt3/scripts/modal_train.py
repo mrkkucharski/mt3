@@ -147,13 +147,54 @@ def _ensure_cuda_library_path() -> None:
   os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_dirs + ([existing] if existing else []))
 
 
-def _t5x_train_command(train_steps: int, save_period: int) -> list[str]:
-  return [
-      'python', '-m', 't5x.train',
-      '--gin_search_paths=/workspace/mt3',
+# Where a 4 s run writes. Deliberately NOT the 2 s MODEL_DIR baked into
+# guitar_pilot_finetune_modal.gin: two window lengths writing checkpoints into
+# one directory would interleave incompatible runs in the same step sequence.
+#
+# Named as the 2 s run's tag plus a `_4s` suffix, so the pair reads as one
+# experiment: guitar_pilot_finetune_64ex_it2 is the 2 s baseline and this is
+# the same corpus and recipe at the longer window. Both restore from
+# checkpoint_0, so `_4s` denotes the window, not a continuation of it2.
+CONTEXT_4S_MODEL_DIR = '/workspace/runs/guitar_pilot_finetune_64ex_it2_4s'
+
+
+def _t5x_train_command(train_steps: int,
+                       save_period: int,
+                       context_4s: bool = False,
+                       model_dir: str | None = None) -> list[str]:
+  """Builds the t5x.train argv.
+
+  `context_4s` appends gin/context_4s.gin, which rebinds TASK_FEATURE_LENGTHS
+  to the ~4 s window (512 input frames, 2048 target tokens). Gin applies files
+  in order and last-write-wins, so the overlay must come AFTER
+  guitar_pilot_finetune_modal.gin to override its 256/1024.
+
+  Setting `context_4s` also forces MODEL_DIR away from the 2 s default, so a
+  4 s run cannot silently write into the 2 s run's directory. Pass `model_dir`
+  to choose the destination explicitly; the flag is not usable in a way that
+  reuses the 2 s directory by accident.
+  """
+  gin_files = [
       '--gin_file=mt3/gin/model.gin',
       '--gin_file=mt3/gin/train.gin',
       '--gin_file=mt3/gin/guitar_pilot_finetune_modal.gin',
+  ]
+  overrides = []
+  if context_4s:
+    gin_files.append('--gin_file=mt3/gin/context_4s.gin')
+    overrides.append(
+        # Quoted because gin parses a binding's value as a Python literal;
+        # bare /workspace/... is not one. subprocess gets an argv list rather
+        # than a shell string, so these quotes reach gin intact.
+        f"--gin.MODEL_DIR='{model_dir or CONTEXT_4S_MODEL_DIR}'")
+  elif model_dir:
+    overrides.append(f"--gin.MODEL_DIR='{model_dir}'")
+
+  return [
+      'python', '-m', 't5x.train',
+      '--gin_search_paths=/workspace/mt3',
+      *gin_files,
+      *overrides,
       # NOT --gin.TRAIN_STEPS: t5x.train's `relative_steps` (an int step
       # count, not a boolean) unconditionally overrides TRAIN_STEPS/
       # total_steps whenever it's set -- see guitar_pilot_finetune_modal.gin.
@@ -176,21 +217,28 @@ def _t5x_train_command(train_steps: int, save_period: int) -> list[str]:
 
 
 @app.function(image=image, gpu='A10G', timeout=4 * 60 * 60, volumes=VOLUMES)
-def run_training(train_steps: int = 1, save_period: int = 25) -> None:
+def run_training(train_steps: int = 1,
+                 save_period: int = 25,
+                 context_4s: bool = False,
+                 model_dir: str | None = None) -> None:
   """Runs one t5x.train invocation and commits the run-artifacts volume.
 
   `train_steps` is relative to wherever the restored checkpoint currently
   sits (see guitar_pilot_finetune_modal.gin) -- pass 1 for the step 8
   preflight, then 100 and later 400 to resume to a cumulative 500 (step 9).
   T5X itself runs as a subprocess, not in this function's own process.
+
+  `context_4s` switches the run to the ~4 s window and redirects MODEL_DIR
+  accordingly; see _t5x_train_command.
   """
   from mt3.model_download import rebuild_checkpoint_0_view
 
   rebuild_checkpoint_0_view(Path('/workspace/model/mt3'))
   _ensure_cuda_library_path()
 
-  result = subprocess.run(
-      _t5x_train_command(train_steps, save_period), cwd='/workspace/mt3')
+  command = _t5x_train_command(train_steps, save_period, context_4s, model_dir)
+  print('t5x command:', ' '.join(command), flush=True)
+  result = subprocess.run(command, cwd='/workspace/mt3')
   runs_volume.commit()
   result.check_returncode()
 
@@ -221,5 +269,9 @@ def check_gpu() -> None:
 
 
 @app.local_entrypoint()
-def main(train_steps: int = 1, save_period: int = 25) -> None:
-  run_training.remote(train_steps=train_steps, save_period=save_period)
+def main(train_steps: int = 1,
+         save_period: int = 25,
+         context_4s: bool = False,
+         model_dir: str | None = None) -> None:
+  run_training.remote(train_steps=train_steps, save_period=save_period,
+                      context_4s=context_4s, model_dir=model_dir)
