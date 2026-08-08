@@ -17,7 +17,6 @@ tf = tensorflow()
 
 # ``note_seq`` may initialize TensorFlow, so it must follow runtime setup.
 import note_seq
-from t5.data import preprocessors as t5_preprocessors
 from t5x import adafactor
 from t5x import partitioning
 from t5x import utils
@@ -52,6 +51,19 @@ class TranscriptionResult:
   note_count: int
   programs: tuple[int, ...]
   drum_note_count: int
+  # Decode diagnostics from metrics_utils.event_predictions_to_ns, summed
+  # across all encoder windows. est_dropped_events grows with overlap by
+  # design under head-crop (MT3_HEADCROP_OVERLAP_PLAN.md Phase 2): every
+  # discarded lookahead tail counts as "dropped", so this is only a
+  # meaningful error signal when compared within one hop/window setting.
+  est_invalid_events: int = 0
+  est_dropped_events: int = 0
+  # Resolved encoder window geometry, so an ablation run's own configuration
+  # travels with its output rather than living only in the invocation.
+  window_frames: int = 0
+  hop_frames: int = 0
+  lookahead_seconds: float = 0.0
+  cost_multiplier: float = 1.0
 
   def as_dict(self) -> dict[str, object]:
     return {
@@ -59,6 +71,12 @@ class TranscriptionResult:
         'note_count': self.note_count,
         'programs': list(self.programs),
         'drum_note_count': self.drum_note_count,
+        'est_invalid_events': self.est_invalid_events,
+        'est_dropped_events': self.est_dropped_events,
+        'window_frames': self.window_frames,
+        'hop_frames': self.hop_frames,
+        'lookahead_seconds': self.lookahead_seconds,
+        'cost_multiplier': self.cost_multiplier,
     }
 
 
@@ -82,17 +100,34 @@ class Transcriber:
   for a checkpoint adapted with gin/context_4s.gin).  It is a plain constructor
   argument rather than a gin binding because inference here builds its model
   from gin/model.gin only, which carries architecture but no task lengths.
+
+  ``lookahead_frames`` (MT3_HEADCROP_OVERLAP_PLAN.md) requests that many
+  spectrogram frames of right-context lookahead per window, by overlapping
+  consecutive windows and discarding the lookahead portion of each window's
+  decoded output (see metrics_utils.decode_and_combine_predictions). It is
+  expressed in frames rather than seconds because it must divide evenly into
+  the checkpoint's own frame grid; convert via
+  spectrograms.SpectrogramConfig().frames_per_second (125 at the defaults) to
+  go from seconds. 0 (the default) reproduces the original non-overlapping
+  baseline exactly.
   """
 
   def __init__(self,
                checkpoint_path: str | Path,
                input_length: int = INPUT_LENGTH,
-               target_length: int = TARGET_LENGTH):
+               target_length: int = TARGET_LENGTH,
+               lookahead_frames: int = 0):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
+    if not 0 <= lookahead_frames < input_length:
+      raise ValueError(
+          f'lookahead_frames must be in [0, {input_length}); got '
+          f'{lookahead_frames}')
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
+    self.lookahead_frames = lookahead_frames
+    self.hop_frames = input_length - lookahead_frames
     self.partitioner = partitioning.PjitPartitioner(num_partitions=1)
     self.spectrogram_config = spectrograms.SpectrogramConfig()
     self.codec = vocabularies.build_codec(
@@ -181,9 +216,9 @@ class Transcriber:
     frame_times = np.arange(len(audio) // hop) / self.spectrogram_config.frames_per_second
     dataset = tf.data.Dataset.from_tensors({'inputs': frames, 'input_times': frame_times})
     chain = [
-        functools.partial(t5_preprocessors.split_tokens_to_inputs_length,
-                          sequence_length=self.sequence_length,
-                          output_features=self.output_features,
+        functools.partial(preprocessors.split_tokens_strided,
+                          window_tokens=self.sequence_length['inputs'],
+                          hop_tokens=self.hop_frames,
                           feature_key='inputs',
                           additional_feature_keys=['input_times']),
         preprocessors.add_dummy_targets,
@@ -194,7 +229,15 @@ class Transcriber:
       dataset = preprocessor(dataset)
     return dataset
 
-  def transcribe(self, audio: np.ndarray) -> note_seq.NoteSequence:
+  def _transcribe_with_diagnostics(self, audio: np.ndarray) -> dict:
+    """Runs inference and returns the full event_predictions_to_ns result.
+
+    Includes 'est_ns' plus decode diagnostics ('est_invalid_events',
+    'est_dropped_events'). Split out from transcribe() so transcribe_file()
+    can populate TranscriptionResult's diagnostic fields without changing
+    transcribe()'s public return type -- evaluate_checkpoint.py and other
+    scripts call transcribe() expecting a bare NoteSequence.
+    """
     dataset = self._dataset(audio)
     model_dataset = self.model.FEATURE_CONVERTER_CLS(pack=False)(
         dataset, task_feature_lengths=self.sequence_length).batch(self.batch_size)
@@ -210,7 +253,10 @@ class Transcriber:
                           'start_time': start_time, 'raw_inputs': []})
     return metrics_utils.event_predictions_to_ns(
         predictions, codec=self.codec,
-        encoding_spec=note_sequences.NoteEncodingWithTiesSpec)['est_ns']
+        encoding_spec=note_sequences.NoteEncodingWithTiesSpec)
+
+  def transcribe(self, audio: np.ndarray) -> note_seq.NoteSequence:
+    return self._transcribe_with_diagnostics(audio)['est_ns']
 
   def transcribe_file(self, input_path: str | Path,
                       output_path: str | Path) -> TranscriptionResult:
@@ -221,10 +267,19 @@ class Transcriber:
       raise FileNotFoundError(f'input WAV does not exist: {input_path}')
     audio = note_seq.audio_io.wav_data_to_samples_librosa(
         input_path.read_bytes(), sample_rate=SAMPLE_RATE)
-    sequence = self.transcribe(audio)
+    result = self._transcribe_with_diagnostics(audio)
+    sequence = result['est_ns']
     note_count = write_multitrack_midi(sequence, output_path)
+    window_frames = self.sequence_length['inputs']
     return TranscriptionResult(
         output_path=output_path,
         note_count=note_count,
         programs=tuple(sorted({note.program for note in sequence.notes if not note.is_drum})),
-        drum_note_count=sum(note.is_drum for note in sequence.notes))
+        drum_note_count=sum(note.is_drum for note in sequence.notes),
+        est_invalid_events=int(result['est_invalid_events']),
+        est_dropped_events=int(result['est_dropped_events']),
+        window_frames=window_frames,
+        hop_frames=self.hop_frames,
+        lookahead_seconds=(
+            self.lookahead_frames / self.spectrogram_config.frames_per_second),
+        cost_multiplier=window_frames / self.hop_frames)

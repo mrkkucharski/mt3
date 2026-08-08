@@ -618,6 +618,107 @@ def compute_spectrograms(ex, spectrogram_config):
   return ex
 
 
+def split_tokens_strided(
+    dataset: tf.data.Dataset,
+    window_tokens: int,
+    hop_tokens: int,
+    feature_key: str = 'inputs',
+    additional_feature_keys: Sequence[str] = (),
+    passthrough_feature_keys: Sequence[str] = (),
+) -> tf.data.Dataset:
+  """Split each example into windows of `window_tokens`, advancing by `hop_tokens`.
+
+  With hop_tokens == window_tokens this is equivalent to (and a drop-in
+  replacement for) t5.data.preprocessors.split_tokens. With
+  hop_tokens < window_tokens, windows overlap: the trailing
+  (window_tokens - hop_tokens) frames of each window are lookahead context for
+  the encoder. Downstream decoding (metrics_utils.decode_and_combine_predictions)
+  already crops each segment's *output* to end where the next segment's kept
+  region begins, so the overlap here only affects encoder input, never which
+  events get kept.
+
+  Window count is ceil(n / hop_tokens) -- this depends only on hop_tokens, not
+  window_tokens, because it is the number of kept (hop-sized) segments needed
+  to tile the example, not the number of windows needed to cover it once. Each
+  window is initially padded to exactly window_tokens by tf.signal.frame, then
+  stripped back to its true content length (window_tokens for every window
+  except possibly the last few, where the requested window would run past the
+  end of the example) so a downstream feature converter pads it the same way
+  it already pads the final segment of a non-overlapping split.
+
+  Args:
+    dataset: a tf.data.Dataset with dictionaries containing the key
+      feature_key.
+    window_tokens: length of each window, in frames.
+    hop_tokens: stride between successive window starts, in frames. Must be
+      in (0, window_tokens].
+    feature_key: the feature to split.
+    additional_feature_keys: additional features to split identically
+      (must share axis-0 length with feature_key).
+    passthrough_feature_keys: features to copy unchanged into every window.
+
+  Returns:
+    a dataset of windowed examples.
+  """
+  if hop_tokens <= 0 or hop_tokens > window_tokens:
+    raise ValueError(
+        f'hop_tokens must be in (0, window_tokens]; got hop_tokens='
+        f'{hop_tokens}, window_tokens={window_tokens}')
+
+  split_keys = set([feature_key] + list(additional_feature_keys))
+  overlap_keys = split_keys & set(passthrough_feature_keys)
+  if overlap_keys:
+    raise ValueError(
+        f'split keys {overlap_keys} also included in passthrough keys')
+
+  feature_keys_to_split = [feature_key, *additional_feature_keys]
+
+  def _split_example(x):
+    n = tf.shape(x[feature_key])[0]
+    asserts = [
+        tf.debugging.assert_equal(
+            tf.shape(x[k])[0], n,
+            message=(f'Additional feature {k} is not the same size as '
+                      f'{feature_key} along axis 0 in split_tokens_strided().'))
+        for k in feature_keys_to_split
+    ]
+    with tf.control_dependencies(asserts):
+      # Matches tf.signal.frame's own frame count for pad_end=True (ceiling
+      # division on hop alone); see its docstring/source for the derivation.
+      num_windows = -(-n // hop_tokens)
+      starts = tf.range(num_windows) * hop_tokens
+      orig_lengths = tf.minimum(window_tokens, n - starts)
+
+      windowed = {
+          k: tf.signal.frame(
+              x[k], frame_length=window_tokens, frame_step=hop_tokens,
+              pad_end=True, pad_value=0, axis=0)
+          for k in feature_keys_to_split
+      }
+
+      windowed_ds = tf.data.Dataset.from_tensor_slices(windowed)
+      lengths_ds = tf.data.Dataset.from_tensor_slices(orig_lengths)
+      if passthrough_feature_keys:
+        passthrough = {k: x[k] for k in passthrough_feature_keys}
+        passthrough_ds = tf.data.Dataset.from_tensors(passthrough).repeat(
+            tf.cast(num_windows, tf.int64))
+        return tf.data.Dataset.zip((windowed_ds, lengths_ds, passthrough_ds))
+      return tf.data.Dataset.zip((windowed_ds, lengths_ds))
+
+  def _strip_padding_and_merge_passthrough(windowed, length, passthrough=None):
+    output = {k: v[:length] for k, v in windowed.items()}
+    if passthrough:
+      output.update(passthrough)
+    return output
+
+  dataset = dataset.filter(lambda x: tf.not_equal(tf.size(x[feature_key]), 0))
+  dataset = dataset.flat_map(_split_example)
+  dataset = dataset.map(
+      _strip_padding_and_merge_passthrough,
+      num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  return dataset
+
+
 def handle_too_long(dataset: tf.data.Dataset,
                     output_features: seqio.preprocessors.OutputFeaturesType,
                     sequence_length: seqio.preprocessors.SequenceLengthType,
