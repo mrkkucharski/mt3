@@ -1,0 +1,123 @@
+# Extending the acoustic window from ~2 s to ~4 s
+
+Preparation branch (`4s-context`). Nothing here has been trained or evaluated
+yet; this branch only makes the 4 s window *runnable* and documents what was
+verified against the code while setting it up.
+
+## What this branch changes
+
+| File | Change |
+| --- | --- |
+| `mt3/gin/context_4s.gin` | New. Thin overlay rebinding `TASK_FEATURE_LENGTHS` to `{'inputs': 512, 'targets': 1024}`. |
+| `mt3/scripts/measure_target_lengths.py` | New. Measures the target-token distribution at a given window so `targets` can be sized before a run, not after a crash. |
+| `mt3/transcription.py` | `Transcriber` takes `input_length` / `target_length`; defaults unchanged at 256/1024. |
+| `mt3/cli.py` | `mt3-transcribe --input-length 512`. Defaults to the old behaviour when omitted. |
+
+The 2 s path is unchanged. The overlay is a separate file rather than an edit
+to `guitar_pilot_finetune_modal.gin` specifically so a 2 s-vs-4 s ablation
+differs in one causal factor only.
+
+## Verified while preparing this (not assumptions)
+
+**The window is expressed only in frames, never seconds.** `spectrograms.py`
+pins `DEFAULT_SAMPLE_RATE = 16000` and `DEFAULT_HOP_WIDTH = 128`, so
+`frames_per_second = 125`. 256 frames = 2.048 s; 512 frames = 4.096 s.
+
+**One value drives both chunking paths.** In `mt3/tasks.py`, the training task
+chunks via `select_random_chunk` and the eval task via
+`split_tokens_to_inputs_length`; both read `sequence_length['inputs']`, so the
+gin rebinding reaches both with no further edits.
+
+**`checkpoint_0` restores directly — no positional surgery.** t5x's `T5Config`
+has no sequence-length-dependent field, and `network.py` builds position
+information with `layers.RelativePositionBiases(num_buckets=32,
+max_distance=128)` invoked as `relative_embedding(inputs.shape[-2],
+inputs.shape[-2], ...)`. The length is read from the live input; the learned
+table is shaped `[num_buckets, num_heads]` and is length-independent. Every
+checkpoint tensor keeps its shape.
+
+> This contradicts the whitepaper's Initiative 4, which flags "positional
+> migration" as the main compatibility risk and prescribes extending a position
+> table by interpolation/extrapolation. That warning assumes **absolute**
+> position embeddings. This codebase uses relative bias, so the migration step
+> it describes does not exist here.
+
+**But there is a real behavioural caveat.** `max_distance=128` (~1.02 s) means
+every frame pair beyond that distance already shares the single coarsest
+bucket. At 512 frames a much larger share of each window sits in that saturated
+bucket than the pretrained model ever had to resolve. The weights load cleanly;
+the model has not learned to *use* the extra context. Expect adaptation steps,
+and expect a 4 s model evaluated at step 0 to look no better than the 2 s one.
+
+## The thing most likely to bite: `targets` length
+
+A 4 s window carries roughly twice the note events of a 2 s window, but
+`targets` does not scale automatically — the overlay deliberately leaves it at
+1024.
+
+This does **not** fail quietly. `mt3/tasks.py` ends the training pipeline with
+`handle_too_long(skip=skip_too_long)`, and `skip_too_long` defaults to `False`,
+which selects the `assert_not_too_long` branch — a `tf.debugging
+.assert_less_equal` that raises `Value for "targets" field exceeds maximum
+length`. On a Modal GPU that surfaces as a dead paid job, possibly well into
+the run.
+
+So measure first:
+
+```sh
+uv run python mt3/scripts/measure_target_lengths.py \
+    --task=guitar_pilot_notes_ties_vb1 --inputs=256   # establish the baseline
+uv run python mt3/scripts/measure_target_lengths.py \
+    --task=guitar_pilot_notes_ties_vb1 --inputs=512   # the proposed window
+```
+
+It reports median/p95/p99/max target lengths and the exact overflow rate
+against the proposed 1024, accounting for the `add_eos` off-by-one that
+`handle_too_long` applies. If it reports overflow, raise `targets` in
+`context_4s.gin` before launching anything.
+
+Caveat stated in the script's docstring: `select_random_chunk(uniform_random_start=True)`
+and `mix_transcription_examples` make each pass a *sample*, not an exhaustive
+bound. Raise `--max_examples` until the reported max stops climbing.
+
+## Relationship to `main`
+
+Branched from `63b4de6`. At branch time `main` had **uncommitted** work
+belonging to the in-flight `guitar_pilot_finetune_64ex_it2` run. The
+`modal_train.py` half of it — pinning `--gin.train.eval_period` to
+`save_period`, because `train.gin` hardcodes `eval_period=5000` and t5x
+requires the checkpoint/eval/GC periods to be multiples of each other — was a
+genuine bug fix independent of the window change and a 4 s run would hit it
+too, so it was committed to `main` on its own (`d85b36e`) and this branch
+rebased onto it. The branch is now `main` plus exactly one commit.
+
+The `MODEL_DIR` edit pointing at `..._64ex_it2` is run-specific and remains
+deliberately uncommitted, as do the untracked `modal_eval.py` and
+`guitar_pilot_eval_modal.gin`.
+
+This branch lives in a `git worktree` at `../mt3-4s-context`, so the `main`
+checkout and the running job were never touched. Remove it with
+`git worktree remove ../mt3-4s-context` when finished.
+
+## Merging is safe; reverting is not a git operation
+
+Every change to a pre-existing file is additive with a behaviour-preserving
+default (`--input-length` defaults to `None`, `input_length` defaults to 256),
+and `context_4s.gin` / `measure_target_lengths.py` are inert unless explicitly
+loaded or run. Merging this branch is therefore a no-op for the 2 s path.
+
+"Going back to 2 s" means dropping `--gin_file=mt3/gin/context_4s.gin` from the
+training invocation and `--input-length` from inference. Existing 2 s
+checkpoints live in their own `MODEL_DIR`s and are never written to. No
+`git revert` and no retraining is involved — which is the reason the window
+lives in an overlay rather than an in-place edit to
+`guitar_pilot_finetune_modal.gin`.
+
+## Suggested order
+
+1. Run `measure_target_lengths.py` at 256 and 512; set `targets` accordingly.
+2. Short local smoke run with `context_4s.gin` — confirm restore + a few steps.
+3. Only then launch a real Modal run, holding data and depth fixed. Give it its
+   own `MODEL_DIR` so the 2 s checkpoints stay independently usable.
+4. Evaluate at 512, and also evaluate the 2 s checkpoint at 512, to separate
+   "the model learned to use context" from "the window changed".

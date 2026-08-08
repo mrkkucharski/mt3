@@ -12,6 +12,12 @@ def _parser() -> argparse.ArgumentParser:
   parser.add_argument('--input', required=True, help='Input WAV file.')
   parser.add_argument('--output', required=True, help='Output MIDI file.')
   parser.add_argument('--json', action='store_true', help='Write the result object as JSON to stdout.')
+  parser.add_argument(
+      '--input-length', type=int, default=None,
+      help='Encoder window in spectrogram frames (125 frames = 1 s). Defaults '
+           'to the 256-frame (~2 s) baseline; pass 512 for a checkpoint '
+           'adapted to the ~4 s window. Must match how the checkpoint was '
+           'trained.')
   return parser
 
 
@@ -20,7 +26,8 @@ def main(argv: list[str] | None = None) -> int:
   # Delay the heavy ML imports until argument parsing has completed.
   from mt3.transcription import Transcriber
 
-  result = Transcriber(args.checkpoint).transcribe_file(args.input, args.output)
+  kwargs = {} if args.input_length is None else {'input_length': args.input_length}
+  result = Transcriber(args.checkpoint, **kwargs).transcribe_file(args.input, args.output)
   if args.json:
     print(json.dumps(result.as_dict(), sort_keys=True))
   else:

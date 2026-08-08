@@ -1,0 +1,53 @@
+# Overlay: extend the encoder's acoustic context window from ~2 s to ~4 s.
+#
+# Load this AFTER whichever guitar_pilot config you are already using, so its
+# TASK_FEATURE_LENGTHS rebinding wins:
+#
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/train.gin
+#   --gin_file=mt3/gin/guitar_pilot_finetune_modal.gin
+#   --gin_file=mt3/gin/context_4s.gin
+#
+# It is deliberately a thin overlay rather than a forked copy of the finetune
+# config: the 2 s path must stay byte-identical so that a 2 s-vs-4 s ablation
+# differs in exactly one causal factor (whitepaper 4.3, "change one causal
+# factor at a time").
+#
+# WINDOW ARITHMETIC. The window length is never written in seconds anywhere in
+# this codebase -- it is derived from TASK_FEATURE_LENGTHS['inputs'], which
+# counts spectrogram FRAMES. spectrograms.py fixes DEFAULT_SAMPLE_RATE=16000
+# and DEFAULT_HOP_WIDTH=128, so frames_per_second = 16000/128 = 125:
+#
+#   256 frames / 125 fps = 2.048 s   (baseline)
+#   512 frames / 125 fps = 4.096 s   (this file)
+#
+# Nothing downstream needs to be told about the change. The training task's
+# t5.data.preprocessors.select_random_chunk and the eval task's
+# split_tokens_to_inputs_length both read sequence_length['inputs'] at
+# pipeline-construction time (mt3/tasks.py), so the new value propagates to
+# both chunking paths automatically.
+#
+# CHECKPOINT COMPATIBILITY. This is a pure sequence-length change and needs no
+# checkpoint surgery. t5x's T5Config carries no sequence-length-dependent
+# field, and the encoder builds its position signal with
+# layers.RelativePositionBiases(num_buckets=32, max_distance=128), called as
+# relative_embedding(inputs.shape[-2], inputs.shape[-2], ...) -- i.e. the
+# length is read from the live input and looked up in a bucket table shaped
+# [num_buckets, num_heads], independent of sequence length. Every tensor in
+# checkpoint_0 therefore keeps its shape and restores directly. (The whitepaper
+# flags "positional migration" as the main compatibility risk of Initiative 4;
+# that warning assumes ABSOLUTE position embeddings and does not apply here.)
+#
+# The behavioural caveat does still apply: max_distance=128 means every pair of
+# frames more than 128 apart (~1.02 s) already shares the single coarsest
+# bucket. At 512 frames a much larger fraction of each window sits inside that
+# saturated bucket than the pretrained model ever had to resolve, so expect to
+# need adaptation steps -- the weights load, but the model has not learned to
+# USE the extra context yet.
+#
+# TARGETS LENGTH IS NOT CHANGED HERE. See the note below; measure before
+# raising it.
+
+from __gin__ import dynamic_registration
+
+TASK_FEATURE_LENGTHS = {'inputs': 512, 'targets': 1024}

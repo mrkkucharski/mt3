@@ -32,6 +32,14 @@ from mt3 import vocabularies
 
 
 SAMPLE_RATE = 16000
+# Encoder window in spectrogram frames. spectrograms.py fixes a 16 kHz sample
+# rate and a hop width of 128, so there are 125 frames per second: the 256
+# default is a ~2.048 s window, and 512 is the ~4.096 s window that
+# gin/context_4s.gin trains. These must match the checkpoint being loaded --
+# a checkpoint adapted to 512 frames will still RESTORE at 256 (the T5X
+# relative position bias is sequence-length independent), it will just be
+# evaluated outside the context it was tuned for, which reads as a quality
+# regression rather than an error.
 INPUT_LENGTH = 256
 TARGET_LENGTH = 1024
 
@@ -68,14 +76,23 @@ class Transcriber:
   Construct one instance per checkpoint and call :meth:`transcribe_file` for
   every WAV file.  Keeping the instance alive avoids restoring the checkpoint
   for each request.
+
+  ``input_length`` is the encoder window in spectrogram frames and must match
+  the window the checkpoint was trained with (256 for the ~2 s baseline, 512
+  for a checkpoint adapted with gin/context_4s.gin).  It is a plain constructor
+  argument rather than a gin binding because inference here builds its model
+  from gin/model.gin only, which carries architecture but no task lengths.
   """
 
-  def __init__(self, checkpoint_path: str | Path):
+  def __init__(self,
+               checkpoint_path: str | Path,
+               input_length: int = INPUT_LENGTH,
+               target_length: int = TARGET_LENGTH):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
     self.batch_size = 1
-    self.sequence_length = {'inputs': INPUT_LENGTH, 'targets': TARGET_LENGTH}
+    self.sequence_length = {'inputs': input_length, 'targets': target_length}
     self.partitioner = partitioning.PjitPartitioner(num_partitions=1)
     self.spectrogram_config = spectrograms.SpectrogramConfig()
     self.codec = vocabularies.build_codec(
