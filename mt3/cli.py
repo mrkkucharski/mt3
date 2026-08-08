@@ -18,6 +18,20 @@ def _parser() -> argparse.ArgumentParser:
            'to the 256-frame (~2 s) baseline; pass 512 for a checkpoint '
            'adapted to the ~4 s window. Must match how the checkpoint was '
            'trained.')
+  lookahead = parser.add_mutually_exclusive_group()
+  lookahead.add_argument(
+      '--lookahead-frames', type=int, default=None,
+      help='MT3_HEADCROP_OVERLAP_PLAN.md: request this many spectrogram '
+           'frames of right-context lookahead per window by overlapping '
+           'consecutive windows (0, the default, reproduces the baseline). '
+           'Must be less than --input-length; cost scales as '
+           'input-length / (input-length - lookahead-frames).')
+  lookahead.add_argument(
+      '--lookahead-seconds', type=float, default=None,
+      help='Same as --lookahead-frames, in seconds. Converted at the fixed '
+           '125 frames/s the spectrogram front end uses (16 kHz sample rate, '
+           '128-sample hop -- see spectrograms.py); truncated to whole '
+           'frames.')
   return parser
 
 
@@ -27,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
   from mt3.transcription import Transcriber
 
   kwargs = {} if args.input_length is None else {'input_length': args.input_length}
+  if args.lookahead_frames is not None:
+    kwargs['lookahead_frames'] = args.lookahead_frames
+  elif args.lookahead_seconds is not None:
+    # Matches spectrograms.SpectrogramConfig().frames_per_second at its
+    # default sample rate and hop width; see the --lookahead-seconds help.
+    kwargs['lookahead_frames'] = int(args.lookahead_seconds * 125)
   result = Transcriber(args.checkpoint, **kwargs).transcribe_file(args.input, args.output)
   if args.json:
     print(json.dumps(result.as_dict(), sort_keys=True))
