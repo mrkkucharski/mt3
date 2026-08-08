@@ -45,9 +45,35 @@
 # need adaptation steps -- the weights load, but the model has not learned to
 # USE the extra context yet.
 #
-# TARGETS LENGTH IS NOT CHANGED HERE. See the note below; measure before
-# raising it.
+# TARGETS IS RAISED TO 2048, AND THAT IS NOT OPTIONAL. Measured with
+# scripts/measure_target_lengths.py on guitar_pilot_notes_ties_vb1_train:
+#
+#   window          median   p95    p99    max     vs 1024
+#   256 (~2.048 s)     112   323    435    608     fits
+#   256, other pass    118   295    501    911     fits (thin)
+#   512 (~4.096 s)     187   571    811   1249     fits
+#   512, other pass    185   518    893   1533     OVERFLOWS (2/500 = 0.4%)
+#
+# Leaving targets at 1024 does not degrade gracefully: tasks.py ends the
+# training pipeline with handle_too_long(skip=skip_too_long) and skip_too_long
+# defaults to False, which is the assert_not_too_long branch -- a raise, not a
+# filter. A 0.4% per-window overflow rate is a near-certain crash over a real
+# run, at an unpredictable step, on a paid GPU.
+#
+# 2048 gives ~33% headroom over the highest length observed anywhere (1533).
+# It cannot be called a proven bound: select_random_chunk draws a different
+# random chunk from each cached segment every epoch, so two full-epoch passes
+# returned maxima of 1249 and 1533. No single pass bounds the tail; re-run the
+# script if the corpus changes.
+#
+# COST. seqio pads every feature to its task_feature_length (models.py:
+# "Each feature in the task_feature_lengths is trimmed/padded") because XLA
+# needs static shapes, so the decoder computes at the FULL target length every
+# step regardless of actual content -- with a median of 187, almost all of that
+# work is padding. Going 1024 -> 2048 therefore quadruples decoder
+# self-attention cost on top of the ~4x encoder attention from the window
+# itself. Both are unconditional. Budget for it before launching.
 
 from __gin__ import dynamic_registration
 
-TASK_FEATURE_LENGTHS = {'inputs': 512, 'targets': 1024}
+TASK_FEATURE_LENGTHS = {'inputs': 512, 'targets': 2048}

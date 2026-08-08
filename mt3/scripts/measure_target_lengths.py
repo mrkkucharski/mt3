@@ -44,9 +44,9 @@ carry no real event content.
 Typical use -- compare the current window against the proposed one:
 
     uv run python mt3/scripts/measure_target_lengths.py \
-        --task=guitar_pilot_notes_ties_vb1 --inputs=256
+        --task=guitar_pilot_notes_ties_vb1_train --inputs=256
     uv run python mt3/scripts/measure_target_lengths.py \
-        --task=guitar_pilot_notes_ties_vb1 --inputs=512
+        --task=guitar_pilot_notes_ties_vb1_train --inputs=512
 """
 
 import numpy as np

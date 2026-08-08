@@ -8,7 +8,7 @@ verified against the code while setting it up.
 
 | File | Change |
 | --- | --- |
-| `mt3/gin/context_4s.gin` | New. Thin overlay rebinding `TASK_FEATURE_LENGTHS` to `{'inputs': 512, 'targets': 1024}`. |
+| `mt3/gin/context_4s.gin` | New. Thin overlay rebinding `TASK_FEATURE_LENGTHS` to `{'inputs': 512, 'targets': 2048}`. |
 | `mt3/scripts/measure_target_lengths.py` | New. Measures the target-token distribution at a given window so `targets` can be sized before a run, not after a crash. |
 | `mt3/transcription.py` | `Transcriber` takes `input_length` / `target_length`; defaults unchanged at 256/1024. |
 | `mt3/cli.py` | `mt3-transcribe --input-length 512`. Defaults to the old behaviour when omitted. |
@@ -49,36 +49,58 @@ bucket than the pretrained model ever had to resolve. The weights load cleanly;
 the model has not learned to *use* the extra context. Expect adaptation steps,
 and expect a 4 s model evaluated at step 0 to look no better than the 2 s one.
 
-## The thing most likely to bite: `targets` length
+## Measured: `targets` must go to 2048
 
-A 4 s window carries roughly twice the note events of a 2 s window, but
-`targets` does not scale automatically — the overlay deliberately leaves it at
-1024.
+A 4 s window carries roughly twice the note events of a 2 s window, and
+`targets` does not scale automatically. This was measured rather than
+estimated, with `scripts/measure_target_lengths.py` on
+`guitar_pilot_notes_ties_vb1_train`:
 
-This does **not** fail quietly. `mt3/tasks.py` ends the training pipeline with
-`handle_too_long(skip=skip_too_long)`, and `skip_too_long` defaults to `False`,
-which selects the `assert_not_too_long` branch — a `tf.debugging
-.assert_less_equal` that raises `Value for "targets" field exceeds maximum
-length`. On a Modal GPU that surfaces as a dead paid job, possibly well into
-the run.
+| window | examples | median | p95 | p99 | max | vs `targets=1024` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 (~2.048 s) | 1040 (full epoch) | 112 | 323 | 435 | 608 | fits |
+| 256 (~2.048 s) | 500 | 118 | 295 | 501 | 911 | fits, thin |
+| 512 (~4.096 s) | 1040 (full epoch) | 187 | 571 | 811 | 1249 | fits |
+| 512 (~4.096 s) | 500 | 185 | 518 | 893 | **1533** | **overflows, 2/500 = 0.4%** |
 
-So measure first:
+Leaving `targets` at 1024 does not degrade gracefully. `mt3/tasks.py` ends the
+training pipeline with `handle_too_long(skip=skip_too_long)`, and
+`skip_too_long` defaults to `False` — the `assert_not_too_long` branch, a
+`tf.debugging.assert_less_equal` that **raises** `Value for "targets" field
+exceeds maximum length`. A 0.4% per-window overflow rate is a near-certain
+crash over a real run, at an unpredictable step, on a paid GPU.
 
-```sh
-uv run python mt3/scripts/measure_target_lengths.py \
-    --task=guitar_pilot_notes_ties_vb1 --inputs=256   # establish the baseline
-uv run python mt3/scripts/measure_target_lengths.py \
-    --task=guitar_pilot_notes_ties_vb1 --inputs=512   # the proposed window
-```
+**2048 is a judgement, not a proven bound.** It clears the highest length seen
+anywhere (1533) by ~33%. But `select_random_chunk(uniform_random_start=True)`
+draws a different chunk from each cached segment every epoch, so two full-epoch
+passes returned maxima of 1249 and 1533 — no single pass bounds the tail. The
+dataset yields 1040 windows per epoch regardless of window size (`split_tokens`
+segments at `MAX_NUM_CACHED_FRAMES=2000` before chunking), so `--max_examples`
+above ~1040 just re-samples rather than covering more ground. Re-run the script
+if the corpus changes.
 
-It reports median/p95/p99/max target lengths and the exact overflow rate
-against the proposed 1024, accounting for the `add_eos` off-by-one that
-`handle_too_long` applies. If it reports overflow, raise `targets` in
-`context_4s.gin` before launching anything.
+The rejected alternative is `skip_too_long=True`, which filters instead of
+raising. It trades a crash for silent bias: the dropped windows are exactly the
+densest passages, so the model would be quietly trained away from busy music.
 
-Caveat stated in the script's docstring: `select_random_chunk(uniform_random_start=True)`
-and `mix_transcription_examples` make each pass a *sample*, not an exhaustive
-bound. Raise `--max_examples` until the reported max stops climbing.
+### This costs real compute
+
+`seqio` pads every feature to its `task_feature_length` — `models.py`'s
+converter docstring: *"Each feature in the `task_feature_lengths` is
+trimmed/padded"* — because XLA needs static shapes. The decoder therefore
+computes at the **full** target length every step regardless of content, and
+with a median of 187 almost all of that work is padding.
+
+So `1024 → 2048` quadruples decoder self-attention cost, on top of the ~4x
+encoder attention from the window change itself. Both are unconditional and
+they compound. This is the main reason a 4 s run is not simply "2x the 2 s
+run".
+
+### Is the current 2 s run at risk?
+
+Not on this evidence — no overflow in either pass. But the worst pass reached
+911 against a 1023 ceiling (89% utilisation), so the margin is thinner than it
+looks. Worth knowing if the corpus ever grows denser.
 
 ## Relationship to `main`
 
