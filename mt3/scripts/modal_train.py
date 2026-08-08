@@ -164,6 +164,13 @@ def _t5x_train_command(train_steps: int, save_period: int) -> list[str]:
       # just `train`.
       f'--gin.train.relative_steps={train_steps}',
       f'--gin.utils.SaveCheckpointConfig.period={save_period}',
+      # train.gin hardcodes eval_period=5000; t5x.train requires the
+      # checkpoint period, eval period, and GC period (always 0 here) to all
+      # be multiples of each other, so a save_period that doesn't divide
+      # 5000 (e.g. 2000) fails fast with "Checkpoint period (N), eval period
+      # (5000), and GC period (0) must all be multiples of each other."
+      # Pinning eval_period to save_period keeps them trivially compatible.
+      f'--gin.train.eval_period={save_period}',
       '--alsologtostderr',
   ]
 
