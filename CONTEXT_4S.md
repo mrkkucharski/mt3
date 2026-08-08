@@ -102,6 +102,51 @@ Not on this evidence — no overflow in either pass. But the worst pass reached
 911 against a 1023 ceiling (89% utilisation), so the margin is thinner than it
 looks. Worth knowing if the corpus ever grows denser.
 
+## Smoke test results
+
+**Restore and forward pass at 512 work — verified by running them, not by
+reading the code.** `Transcriber(checkpoint_0, input_length=512,
+target_length=2048)` restores with no shape error and transcribes end to end
+to MIDI. The seqio task pipeline also materialises a full 1040-window epoch at
+512. The compatibility claim above is therefore empirical.
+
+**A local training step could not be tested — pre-existing environment fault,
+unrelated to this branch.** `python -m t5x.train` on this Mac dies in
+`prepare_train_iter` with:
+
+```
+InternalError: Can't find an output tensor for the output node:
+identity_RetVal [Op:MakeIterator]
+```
+
+The identical command **without** `context_4s.gin` (i.e. at the 256/1024
+baseline) fails in exactly the same place, so this is the Apple-Silicon
+TensorFlow input-pipeline problem the project already knows about, not the
+window change. Note the data pipeline itself is fine — `task.get_dataset()`
+iterates happily at 512; it is t5x's `clu` train-iterator wrapper that breaks.
+The first real training step at 512 must therefore happen on Modal.
+
+**Inference throughput is roughly flat, which is not the win it looks like.**
+Warm timings (model constructed and JIT-compiled first), 30 s of audio on an
+M4 CPU:
+
+| window | wall clock | realtime factor | notes predicted |
+| --- | --- | --- | --- |
+| 256 (2 s) | 21.5 s | 1.40x | 1097 |
+| 512 (4 s) | 20.3 s | 1.48x | 460 |
+
+Per-window cost rises, but there are half as many windows, so whole-file
+throughput roughly cancels out. **However, the 4 s column is faster partly
+because it predicts 460 notes instead of 1097** — the un-adapted checkpoint
+under-predicts badly at a window it was never trained for, and the
+autoregressive decoder simply runs fewer steps. This is the behavioural caveat
+from the previous section showing up as a number. Re-measure once the model is
+actually adapted; expect the gap to close as note counts recover.
+
+Training cost does *not* get this reprieve: targets are padded to the full 2048
+every step regardless of content, so the 4x decoder-attention increase there is
+unconditional.
+
 ## Relationship to `main`
 
 Branched from `63b4de6`. At branch time `main` had **uncommitted** work
@@ -137,9 +182,15 @@ lives in an overlay rather than an in-place edit to
 
 ## Suggested order
 
-1. Run `measure_target_lengths.py` at 256 and 512; set `targets` accordingly.
-2. Short local smoke run with `context_4s.gin` — confirm restore + a few steps.
-3. Only then launch a real Modal run, holding data and depth fixed. Give it its
-   own `MODEL_DIR` so the 2 s checkpoints stay independently usable.
-4. Evaluate at 512, and also evaluate the 2 s checkpoint at 512, to separate
-   "the model learned to use context" from "the window changed".
+1. ~~Run `measure_target_lengths.py` at 256 and 512~~ — done; `targets` set to
+   2048 on the evidence above.
+2. ~~Local smoke run~~ — restore and forward pass at 512 confirmed. A local
+   training step is not possible on this machine (see above).
+3. **Next:** a 1-step Modal preflight with `context_4s.gin` appended to the
+   gin chain, to confirm a real optimizer step at 512/2048 and to get the true
+   peak-memory number on the A10G.
+4. Then the real run, holding data and depth fixed. Give it its own
+   `MODEL_DIR` so the 2 s checkpoints stay independently usable.
+5. Evaluate at 512, and also evaluate the 2 s checkpoint at 512, to separate
+   "the model learned to use context" from "the window changed". Re-run the
+   inference timing once note counts recover.
