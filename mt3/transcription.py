@@ -226,16 +226,41 @@ def _quantize(t: float, codec) -> float:
 
 
 def _min_decode_time(start_time: float, geometry: WindowGeometry, codec,
-                     spectrogram_config) -> float:
+                     spectrogram_config) -> float | None:
   """A window's kept-region start, quantized onto the same codec step grid as `start_time`.
 
   `start_time` must already be quantized (see `_quantize`) -- both are
   quantized against the same grid so a boundary event can't fall through
   the crack between this window's own max_decode_time (the next window's
   min_decode_time) and this value.
+
+  Returns None when `geometry.lookback_frames` is 0, rather than
+  `start_time` itself: passing decode_events a non-None `min_time` (even
+  one that can never actually suppress anything, since a segment's own
+  cur_time can never fall below its own start_time) switches its
+  max_time boundary test from the legacy inclusive `cur_time > max_time`
+  to the half-open `cur_time >= max_time` -- silently dropping an event
+  that lands exactly on a window boundary, which is common rather than
+  rare once both sides are quantized onto the same codec step grid. None
+  preserves the exact legacy comparison, which is the whole point of the
+  lookback_frames=0 compatibility anchor.
   """
+  if not geometry.lookback_frames:
+    return None
   lookback_seconds = geometry.seconds(geometry.lookback_frames, spectrogram_config)
   return _quantize(start_time + lookback_seconds, codec)
+
+
+def _should_cap_last_segment_tail(geometry: WindowGeometry) -> bool:
+  """Whether the last segment's tail should be capped at the real audio duration.
+
+  Only when overlap is actually in use: capping is new behavior relative
+  to the pre-overlap baseline (previously the last segment's
+  max_decode_time was always unbounded), and the lookback_frames=0,
+  lookahead_frames=0 compatibility anchor must reproduce that baseline
+  exactly, not this improvement.
+  """
+  return bool(geometry.lookback_frames or geometry.lookahead_frames)
 
 
 def _cap_last_segment_tail(predictions: list[dict], audio_duration_seconds: float) -> None:
@@ -420,11 +445,12 @@ class Transcriber:
               start_time, self.geometry, self.codec, self.spectrogram_config),
           'raw_inputs': [],
       })
-    # _windowed_input_dataset() left-pads for lookback but never right-pads
-    # beyond a whole frame, so this is an exact real-audio-duration cap, not
-    # an approximation.
-    _cap_last_segment_tail(
-        predictions, len(audio) / self.spectrogram_config.sample_rate)
+    if _should_cap_last_segment_tail(self.geometry):
+      # _windowed_input_dataset() left-pads for lookback but never
+      # right-pads beyond a whole frame, so this cap is exact, not an
+      # approximation.
+      _cap_last_segment_tail(
+          predictions, len(audio) / self.spectrogram_config.sample_rate)
     return metrics_utils.event_predictions_to_ns(
         predictions, codec=self.codec,
         encoding_spec=note_sequences.NoteEncodingWithTiesSpec)
