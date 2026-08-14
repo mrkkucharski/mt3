@@ -125,12 +125,6 @@ class TranscriberGeometryValidationTest(tf.test.TestCase):
         transcription.Transcriber(
             ckpt, input_length=256, lookahead_frames=256)
 
-  def test_nonzero_lookback_frames_raises_not_implemented(self):
-    with tempfile.TemporaryDirectory() as ckpt:
-      with self.assertRaisesRegex(
-          NotImplementedError, 'lookback_frames is not yet wired'):
-        transcription.Transcriber(ckpt, input_length=256, lookback_frames=64)
-
   def test_missing_checkpoint_raises_before_geometry_validation(self):
     with self.assertRaises(FileNotFoundError):
       transcription.Transcriber(
@@ -271,6 +265,129 @@ class WindowedInputDatasetTest(tf.test.TestCase):
       end = min(start + geometry.keep_frames, num_orig_frames)
       want = orig_frames[start:end]
       self.assertAllClose(kept[:len(want)], want, msg=i)
+
+
+class _FakeCodec:
+
+  def __init__(self, steps_per_second):
+    self.steps_per_second = steps_per_second
+
+
+class _FakeSpectrogramConfig:
+
+  def __init__(self, frames_per_second, sample_rate=16000):
+    self.frames_per_second = frames_per_second
+    self.sample_rate = sample_rate
+
+
+class QuantizeTest(tf.test.TestCase):
+
+  def test_floors_onto_the_codec_step_grid(self):
+    codec = _FakeCodec(steps_per_second=100)  # step = 0.01s
+    self.assertAlmostEqual(transcription._quantize(0.017, codec), 0.01)
+    self.assertAlmostEqual(transcription._quantize(0.02, codec), 0.02)
+    self.assertAlmostEqual(transcription._quantize(0.0, codec), 0.0)
+
+  def test_exact_multiples_are_not_floored_down_a_whole_extra_step(self):
+    # Regression test: `t - t % step` looks equivalent but isn't -- `5.0 %
+    # 0.01` in floating point is ~0.00999999999999990, not 0.0, since 0.01
+    # has no exact binary representation. That floors 5.0 down to 4.99.
+    codec = _FakeCodec(steps_per_second=100)
+    for t in (5.0, 4.5, 6.5, 8.5, 9.0):
+      self.assertEqual(transcription._quantize(t, codec), t, msg=t)
+
+
+class MinDecodeTimeTest(tf.test.TestCase):
+
+  def test_zero_lookback_returns_none_not_start_time(self):
+    # None (not start_time) is what makes lookback_frames=0 a true no-op:
+    # a non-None min_time changes decode_events' max_time boundary test
+    # from the legacy inclusive `>` to the half-open `>=`, even if it can
+    # never actually suppress anything on its own. See the docstring.
+    geometry = transcription.WindowGeometry(window_frames=256)
+    codec = _FakeCodec(steps_per_second=100)
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertIsNone(
+        transcription._min_decode_time(0.32, geometry, codec, spec))
+
+  def test_adds_and_quantizes_lookback_seconds(self):
+    # lookback_frames=125 at 125 fps -> 1.0s of lookback.
+    geometry = transcription.WindowGeometry(
+        window_frames=500, lookback_frames=125, lookahead_frames=125)
+    codec = _FakeCodec(steps_per_second=100)  # step = 0.01s
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertAlmostEqual(
+        transcription._min_decode_time(0.32, geometry, codec, spec), 1.32)
+
+  def test_negative_start_time_from_window_zero_padding(self):
+    # Window 0 with lookback has a negative start_time (its own first
+    # frame is in the artificial silence pad); min_decode_time should land
+    # at or near true audio time 0.
+    geometry = transcription.WindowGeometry(
+        window_frames=500, lookback_frames=125, lookahead_frames=125)
+    codec = _FakeCodec(steps_per_second=100)
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertAlmostEqual(
+        transcription._min_decode_time(-1.0, geometry, codec, spec), 0.0)
+
+
+class ShouldCapLastSegmentTailTest(tf.test.TestCase):
+
+  def test_false_for_the_pure_baseline(self):
+    # The compatibility anchor: 0/0 must not gain new behavior relative to
+    # the pre-overlap baseline.
+    geometry = transcription.WindowGeometry(window_frames=256)
+    self.assertFalse(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_lookahead_only(self):
+    geometry = transcription.WindowGeometry(window_frames=256, lookahead_frames=64)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_lookback_only(self):
+    geometry = transcription.WindowGeometry(window_frames=256, lookback_frames=64)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_both(self):
+    geometry = transcription.WindowGeometry(
+        window_frames=256, lookback_frames=32, lookahead_frames=32)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
+
+
+class CapLastSegmentTailTest(tf.test.TestCase):
+
+  def test_caps_the_chronologically_last_prediction(self):
+    predictions = [
+        {'start_time': 0.0},
+        {'start_time': 2.0},
+        {'start_time': 1.0},
+    ]
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=2.5)
+    self.assertNotIn('max_decode_time', predictions[0])
+    self.assertNotIn('max_decode_time', predictions[2])
+    self.assertAlmostEqual(predictions[1]['max_decode_time'], 2.5, delta=1e-5)
+
+  def test_cap_is_nudged_past_audio_duration_not_exactly_on_it(self):
+    # Regression test: a note whose true offset lands exactly at
+    # audio_duration_seconds must not be silently dropped. If the last
+    # segment also has its own min_decode_time (lookback_frames > 0),
+    # run_length_encoding.decode_events treats max_time as the EXCLUSIVE
+    # end of a half-open interval -- correct when max_time is the *next*
+    # segment's min_decode_time (nothing left over, since that segment's
+    # min_time picks it up instead), wrong here since there is no next
+    # segment to compensate.
+    predictions = [{'start_time': 0.0}]
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=9.0)
+    self.assertGreater(predictions[0]['max_decode_time'], 9.0)
+    # ...but only a hair past it: a genuinely hallucinated event from the
+    # padding tail needs at least one full codec step (0.01s at the
+    # defaults) past audio_duration_seconds to be encoded at all, and must
+    # still be excluded.
+    self.assertLess(predictions[0]['max_decode_time'], 9.005)
+
+  def test_empty_predictions_is_a_noop(self):
+    predictions = []
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=2.5)
+    self.assertEqual(predictions, [])
 
 
 if __name__ == '__main__':

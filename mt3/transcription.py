@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,12 +111,22 @@ class TranscriptionResult:
   # design under head-crop (MT3_HEADCROP_OVERLAP_PLAN.md Phase 2): every
   # discarded lookahead tail counts as "dropped", so this is only a
   # meaningful error signal when compared within one hop/window setting.
+  # est_suppressed_events is lookback's analogue: every event discarded
+  # from a window's suppressed (lookback) prefix counts here, so it is
+  # similarly only meaningful within one geometry, and is 0 whenever
+  # lookback_seconds is 0.
   est_invalid_events: int = 0
   est_dropped_events: int = 0
+  est_suppressed_events: int = 0
   # Resolved encoder window geometry, so an ablation run's own configuration
   # travels with its output rather than living only in the invocation.
   window_frames: int = 0
+  # keep_frames is the unambiguous name (window_frames - lookback_frames -
+  # lookahead_frames); hop_frames is kept alongside it for continuity with
+  # callers that predate lookback, where the two were always equal.
+  keep_frames: int = 0
   hop_frames: int = 0
+  lookback_seconds: float = 0.0
   lookahead_seconds: float = 0.0
   cost_multiplier: float = 1.0
 
@@ -127,8 +138,11 @@ class TranscriptionResult:
         'drum_note_count': self.drum_note_count,
         'est_invalid_events': self.est_invalid_events,
         'est_dropped_events': self.est_dropped_events,
+        'est_suppressed_events': self.est_suppressed_events,
         'window_frames': self.window_frames,
+        'keep_frames': self.keep_frames,
         'hop_frames': self.hop_frames,
+        'lookback_seconds': self.lookback_seconds,
         'lookahead_seconds': self.lookahead_seconds,
         'cost_multiplier': self.cost_multiplier,
     }
@@ -206,6 +220,89 @@ def _windowed_input_dataset(
   return dataset
 
 
+def _quantize(t: float, codec) -> float:
+  """Floors `t` onto the codec's own step grid (multiples of 1/steps_per_second).
+
+  Computed via floor(t * steps_per_second) / steps_per_second, not the
+  more obvious `t - t % step`: floating-point modulo of `t` against a step
+  like 0.01 (not exactly representable in binary) routinely lands a hair
+  below zero for a `t` that is decimally an exact multiple -- e.g.
+  `5.0 % 0.01` is ~0.00999999999999990, not 0.0 -- which then floors a
+  whole extra step, e.g. 5.0 down to 4.99. A tiny epsilon before flooring
+  absorbs that noise while being far too small to affect any genuine
+  non-boundary `t` (codec steps are >= 0.01s, 7+ orders of magnitude
+  larger than the epsilon).
+  """
+  steps = math.floor(t * codec.steps_per_second + 1e-9)
+  return steps / codec.steps_per_second
+
+
+def _min_decode_time(start_time: float, geometry: WindowGeometry, codec,
+                     spectrogram_config) -> float | None:
+  """A window's kept-region start, quantized onto the same codec step grid as `start_time`.
+
+  `start_time` must already be quantized (see `_quantize`) -- both are
+  quantized against the same grid so a boundary event can't fall through
+  the crack between this window's own max_decode_time (the next window's
+  min_decode_time) and this value.
+
+  Returns None when `geometry.lookback_frames` is 0, rather than
+  `start_time` itself: passing decode_events a non-None `min_time` (even
+  one that can never actually suppress anything, since a segment's own
+  cur_time can never fall below its own start_time) switches its
+  max_time boundary test from the legacy inclusive `cur_time > max_time`
+  to the half-open `cur_time >= max_time` -- silently dropping an event
+  that lands exactly on a window boundary, which is common rather than
+  rare once both sides are quantized onto the same codec step grid. None
+  preserves the exact legacy comparison, which is the whole point of the
+  lookback_frames=0 compatibility anchor.
+  """
+  if not geometry.lookback_frames:
+    return None
+  lookback_seconds = geometry.seconds(geometry.lookback_frames, spectrogram_config)
+  return _quantize(start_time + lookback_seconds, codec)
+
+
+def _should_cap_last_segment_tail(geometry: WindowGeometry) -> bool:
+  """Whether the last segment's tail should be capped at the real audio duration.
+
+  Only when overlap is actually in use: capping is new behavior relative
+  to the pre-overlap baseline (previously the last segment's
+  max_decode_time was always unbounded), and the lookback_frames=0,
+  lookahead_frames=0 compatibility anchor must reproduce that baseline
+  exactly, not this improvement.
+  """
+  return bool(geometry.lookback_frames or geometry.lookahead_frames)
+
+
+def _cap_last_segment_tail(predictions: list[dict], audio_duration_seconds: float) -> None:
+  """Caps the chronologically-last prediction's decode window at the real end of the audio.
+
+  Mutates `predictions` in place. Without this, the last segment's
+  max_decode_time stays unbounded and a lookahead tail can decode events
+  from the padding-only silence past the end of the file. No-op on an
+  empty list.
+
+  The cap is nudged a hair past audio_duration_seconds rather than sitting
+  exactly on it. If this segment also has its own min_decode_time (true
+  whenever lookback_frames > 0), run_length_encoding.decode_events treats
+  max_time as the exclusive end of a half-open [min_time, max_time)
+  interval -- correct when max_time is the *next* segment's own
+  min_decode_time (that segment's min_time picks up anything at the exact
+  boundary instead), but there is no next segment here to do that. Without
+  the nudge, a real note ending at exactly the last frame of the file --
+  entirely plausible, not an edge case a real recording avoids -- would be
+  silently dropped instead of kept. The nudge is far smaller than a single
+  codec step, so it can't admit a genuinely hallucinated event from the
+  padding tail, which would need at least one full step past
+  audio_duration_seconds to be encoded at all.
+  """
+  if not predictions:
+    return
+  last = max(predictions, key=lambda pred: pred['start_time'])
+  last['max_decode_time'] = audio_duration_seconds + 1e-6
+
+
 class Transcriber:
   """A reusable MT3 multi-instrument inference model.
 
@@ -219,16 +316,24 @@ class Transcriber:
   argument rather than a gin binding because inference here builds its model
   from gin/model.gin only, which carries architecture but no task lengths.
 
-  ``lookahead_frames`` (MT3_HEADCROP_OVERLAP_PLAN.md) requests that many
-  spectrogram frames of right-context lookahead per window, by overlapping
-  consecutive windows and discarding the lookahead portion of each window's
-  decoded output (see metrics_utils.decode_and_combine_predictions).
-  ``lookback_frames`` is the same idea mirrored onto the left of the window
-  (left-context). Both are expressed in frames rather than seconds because
-  they must divide evenly into the checkpoint's own frame grid; convert via
-  spectrograms.SpectrogramConfig().frames_per_second (125 at the defaults)
-  to go from seconds. 0 for both (the default) reproduces the original
-  non-overlapping baseline exactly.
+  Each encoder window splits into three parts, ``[lookback | keep |
+  lookahead]`` (see WindowGeometry): ``keep`` is the region whose decoded
+  output actually ends up in the transcription; ``lookback_frames`` and
+  ``lookahead_frames`` are extra context the encoder sees but whose own
+  decoded output is discarded, by overlapping consecutive windows
+  (MT3_HEADCROP_OVERLAP_PLAN.md documents the lookahead half of this in
+  detail; lookback is its mirror on the other side of the window --
+  ``_windowed_input_dataset`` left-pads the audio so window 0 gets real
+  silence rather than reused content, and
+  metrics_utils.decode_and_combine_predictions crops each window's decoded
+  output to ``[this window's kept-region start, the next window's
+  kept-region start)``). Both are expressed in frames rather than seconds
+  because they must divide evenly into the checkpoint's own frame grid;
+  convert via spectrograms.SpectrogramConfig().frames_per_second (125 at
+  the defaults) to go from seconds. 0 for both (the default) reproduces
+  the original non-overlapping baseline exactly -- this is the
+  compatibility anchor the whole feature leans on, and is covered by its
+  own regression tests.
   """
 
   def __init__(self,
@@ -244,15 +349,6 @@ class Transcriber:
         window_frames=input_length,
         lookback_frames=lookback_frames,
         lookahead_frames=lookahead_frames)
-    if lookback_frames != 0:
-      # _dataset() builds a correctly left-shifted window, but the decode
-      # side (metrics_utils.decode_and_combine_predictions crops segments
-      # using only each segment's start_time, with no notion of a
-      # per-segment kept-region start) doesn't honor one yet; a value that
-      # isn't honored end to end must not silently produce wrong output.
-      raise NotImplementedError(
-          'lookback_frames is not yet wired through Transcriber; got '
-          f'{lookback_frames}')
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
     self.lookahead_frames = lookahead_frames
@@ -364,13 +460,23 @@ class Transcriber:
     predictions = []
     for example, batch in zip(dataset.as_numpy_iterator(), model_dataset.as_numpy_iterator()):
       tokens, _ = self._predict(self._train_state.params, batch, jax.random.PRNGKey(0))
-      start_time = example['input_times'][0]
-      start_time -= start_time % (1 / self.codec.steps_per_second)
+      start_time = _quantize(example['input_times'][0], self.codec)
       decoded = self.vocabulary.decode_tf(tokens[0]).numpy()
       if vocabularies.DECODED_EOS_ID in decoded:
         decoded = decoded[:np.argmax(decoded == vocabularies.DECODED_EOS_ID)]
-      predictions.append({'est_tokens': np.asarray(decoded, np.int32),
-                          'start_time': start_time, 'raw_inputs': []})
+      predictions.append({
+          'est_tokens': np.asarray(decoded, np.int32),
+          'start_time': start_time,
+          'min_decode_time': _min_decode_time(
+              start_time, self.geometry, self.codec, self.spectrogram_config),
+          'raw_inputs': [],
+      })
+    if _should_cap_last_segment_tail(self.geometry):
+      # _windowed_input_dataset() left-pads for lookback but never
+      # right-pads beyond a whole frame, so this cap is exact, not an
+      # approximation.
+      _cap_last_segment_tail(
+          predictions, len(audio) / self.spectrogram_config.sample_rate)
     return metrics_utils.event_predictions_to_ns(
         predictions, codec=self.codec,
         encoding_spec=note_sequences.NoteEncodingWithTiesSpec)
@@ -398,8 +504,12 @@ class Transcriber:
         drum_note_count=sum(note.is_drum for note in sequence.notes),
         est_invalid_events=int(result['est_invalid_events']),
         est_dropped_events=int(result['est_dropped_events']),
+        est_suppressed_events=int(result['est_suppressed_events']),
         window_frames=window_frames,
+        keep_frames=self.geometry.keep_frames,
         hop_frames=self.hop_frames,
-        lookahead_seconds=(
-            self.lookahead_frames / self.spectrogram_config.frames_per_second),
+        lookback_seconds=self.geometry.seconds(
+            self.geometry.lookback_frames, self.spectrogram_config),
+        lookahead_seconds=self.geometry.seconds(
+            self.geometry.lookahead_frames, self.spectrogram_config),
         cost_multiplier=window_frames / self.hop_frames)
