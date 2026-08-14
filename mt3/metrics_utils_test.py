@@ -259,6 +259,164 @@ class MetricsUtilsTest(tf.test.TestCase):
     np.testing.assert_approx_equal(prec, 1/3)
     np.testing.assert_approx_equal(rec, 1/3)
 
+  def test_event_predictions_to_ns_surfaces_suppressed_events(self):
+    codec = event_codec.Codec(
+        max_shift_steps=100,
+        steps_per_second=100,
+        event_ranges=[
+            event_codec.EventRange('pitch', note_seq.MIN_MIDI_PITCH,
+                                   note_seq.MAX_MIDI_PITCH)])
+    predictions = [
+        {'raw_inputs': [], 'start_time': 0.0, 'est_tokens': [20, 160]},
+        # cur_time reaches 0.1+0.2=0.3, which is < this segment's own
+        # min_decode_time (0.5) -- suppressed.
+        {'raw_inputs': [], 'start_time': 0.1, 'min_decode_time': 0.5,
+         'est_tokens': [20, 160]},
+    ]
+    res = metrics_utils.event_predictions_to_ns(
+        predictions, codec=codec,
+        encoding_spec=note_sequences.NoteOnsetEncodingSpec)
+    self.assertGreater(res['est_suppressed_events'], 0)
+
+  def test_event_predictions_to_ns_suppressed_events_zero_by_default(self):
+    codec = event_codec.Codec(
+        max_shift_steps=100,
+        steps_per_second=100,
+        event_ranges=[
+            event_codec.EventRange('pitch', note_seq.MIN_MIDI_PITCH,
+                                   note_seq.MAX_MIDI_PITCH)])
+    predictions = [
+        {'raw_inputs': [], 'start_time': 0.0, 'est_tokens': [20, 160]},
+    ]
+    res = metrics_utils.event_predictions_to_ns(
+        predictions, codec=codec,
+        encoding_spec=note_sequences.NoteOnsetEncodingSpec)
+    self.assertEqual(res['est_suppressed_events'], 0)
+
+
+class DecodeAndCombinePredictionsTest(tf.test.TestCase):
+  """Tests decode_and_combine_predictions' crop-bound plumbing in isolation
+
+  from note_sequences.py, using a fake decode_tokens_fn that just records
+  its own call arguments -- this is generic plumbing, unrelated to how any
+  particular decode_event_fn interprets min_time/max_time.
+  """
+
+  def _run(self, predictions, decode_tokens_fn):
+    return metrics_utils.decode_and_combine_predictions(
+        predictions=predictions,
+        init_state_fn=list,
+        begin_segment_fn=lambda state: state.append('begin'),
+        decode_tokens_fn=decode_tokens_fn,
+        flush_state_fn=list)
+
+  def test_legacy_call_shape_unchanged_when_no_min_decode_time(self):
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': []},
+        {'start_time': 1.0, 'est_tokens': []},
+        {'start_time': 2.0, 'est_tokens': []},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls, [
+        (0.0, 1.0, None),
+        (1.0, 2.0, None),
+        (2.0, None, None),
+    ])
+
+  def test_explicit_none_min_decode_time_falls_back_to_start_time(self):
+    # A caller that always includes 'min_decode_time' but sets it to None
+    # for a non-lookback segment (rather than omitting the key) must not
+    # leave the preceding segment's decode window unbounded.
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': None},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': None},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls, [
+        (0.0, 1.0, None),
+        (1.0, None, None),
+    ])
+
+  def test_min_decode_time_used_for_tiling_and_min_time(self):
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': 0.0},
+        {'start_time': 0.5, 'est_tokens': [], 'min_decode_time': 1.0},
+        {'start_time': 1.5, 'est_tokens': [], 'min_decode_time': 2.0},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls, [
+        (0.0, 1.0, 0.0),   # max_time = next segment's min_decode_time
+        (0.5, 2.0, 1.0),
+        (1.5, None, 2.0),  # last segment, no max_decode_time -> unbounded
+    ])
+
+  def test_last_segment_max_decode_time_caps_the_tail(self):
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': 0.0},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': 2.0,
+         'max_decode_time': 3.5},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls[-1], (1.0, 3.5, 2.0))
+
+  def test_max_decode_time_ignored_on_non_last_segment(self):
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        # Supplies its own max_decode_time, but it is not the last segment
+        # -- tiling against the next segment's min_decode_time must win.
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': 0.0,
+         'max_decode_time': 99.0},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': 1.5},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls[0], (0.0, 1.5, 0.0))
+
+  def test_suppressed_events_summed_across_segments(self):
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens, start_time, max_time, min_time
+      return (0, 0, 3)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': 0.0},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': 1.5},
+    ]
+    _, invalid, dropped, suppressed = self._run(predictions, fake_decode)
+    self.assertEqual((invalid, dropped, suppressed), (0, 0, 6))
+
+  def test_inconsistent_min_decode_time_ordering_raises(self):
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens, start_time, max_time, min_time
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': 5.0},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': 1.0},
+    ]
+    with self.assertRaisesRegex(ValueError, 'not consistently ordered'):
+      self._run(predictions, fake_decode)
+
 
 if __name__ == '__main__':
   tf.test.main()
