@@ -391,6 +391,13 @@ def decode_note_onset_event(
 ) -> None:
   """Process note onset event and update decoding state."""
   if event.type == 'pitch':
+    if state.suppress:
+      # Already added to note_sequence by an earlier window's kept region
+      # (NoteOnsetEncodingSpec has no active_pitches/tie-section state to
+      # check against -- every onset is unconditional -- so without this
+      # guard a re-declared onset in the suppressed prefix would duplicate
+      # the note outright).
+      return
     state.note_sequence.notes.add(
         start_time=time, end_time=time + DEFAULT_NOTE_DURATION,
         pitch=event.value, velocity=DEFAULT_VELOCITY)
@@ -435,13 +442,14 @@ def decode_note_event(
       raise ValueError('event time < current time, %f < %f' % (
           time, state.current_time))
     state.current_time = time
+  if state.suppress and event.type in ('pitch', 'drum'):
+    # This onset/offset was already committed by an earlier window's kept
+    # region -- active_pitches (or note_sequence, for a drum hit) already
+    # reflects it, or its closure. Re-applying it here would double-commit
+    # an onset, or raise on a note-off for a pitch that has since
+    # legitimately closed.
+    return
   if event.type == 'pitch':
-    if state.suppress:
-      # This onset/offset was already committed by an earlier window's
-      # kept region -- active_pitches already reflects it (or its closure).
-      # Re-applying it here would double-commit an onset, or raise on a
-      # note-off for a pitch that has since legitimately closed.
-      return
     pitch = event.value
     key = (pitch, state.current_program, state.current_rhythm)
     if state.is_tie_section:
@@ -478,9 +486,6 @@ def decode_note_event(
             program=state.current_program, rhythm=state.current_rhythm)
       state.active_pitches[key] = (time, state.current_velocity)
   elif event.type == 'drum':
-    if state.suppress:
-      # Already added to note_sequence by an earlier window's kept region.
-      return
     # drum onset (drums have no offset)
     if state.current_velocity == 0:
       raise ValueError('velocity cannot be zero for drum event')
