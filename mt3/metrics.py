@@ -238,6 +238,7 @@ def transcription_metrics(
   for target, prediction in full_target_prediction_pairs:
     scores['Invalid events'].append(prediction['est_invalid_events'])
     scores['Dropped events'].append(prediction['est_dropped_events'])
+    scores['Suppressed events'].append(prediction['est_suppressed_events'])
 
     def remove_drums(ns):
       ns_drumless = note_seq.NoteSequence()

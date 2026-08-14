@@ -63,24 +63,40 @@ def decode_and_combine_predictions(
     decode_tokens_fn: Callable[[S, Sequence[int], int, Optional[int]],
                                Tuple[int, int, int]],
     flush_state_fn: Callable[[S], T]
-) -> Tuple[T, int, int]:
+) -> Tuple[T, int, int, int]:
   """Decode and combine a sequence of predictions to a full result.
 
   For time-based events, this usually means concatenation.
 
   Args:
-    predictions: List of predictions, each of which is a dictionary containing
-        estimated tokens ('est_tokens') and start time ('start_time') fields.
+    predictions: List of predictions, each of which is a dictionary
+        containing estimated tokens ('est_tokens') and start time
+        ('start_time') fields. May also optionally include:
+          - 'min_decode_time': the start of THIS segment's kept region, for
+            a caller using lookback overlap (WindowGeometry). Absent means
+            the kept region starts at 'start_time' itself (today's
+            non-lookback behavior). Segments must be consistently ordered
+            by 'min_decode_time' where present -- sorting below is still by
+            'start_time', so the two orderings must agree.
+          - 'max_decode_time': an explicit cap on how far the LAST segment
+            (by start_time) may decode -- e.g. the real audio's duration,
+            so a lookahead tail can't emit events into padding-only silence
+            past the end of the file. Ignored on any non-last segment,
+            since tiling against the next segment's own 'min_decode_time'
+            (or 'start_time') always takes priority there. Absent leaves
+            the last segment unbounded, exactly as before this field
+            existed.
     init_state_fn: Function that takes no arguments and returns an initial
         decoding state.
     begin_segment_fn: Function that updates the decoding state at the beginning
         of a segment.
     decode_tokens_fn: Function that takes a decoding state, estimated tokens
         (for a single segment), start time, and max time, and processes the
-        tokens, updating the decoding state in place. Also returns the number
-        of invalid, dropped, and suppressed events for the segment (the third
-        value is unused here -- no caller of decode_and_combine_predictions
-        threads a per-segment min_time yet, so it is always 0).
+        tokens, updating the decoding state in place. Also returns the
+        number of invalid, dropped, and suppressed events for the segment.
+        Also called with a keyword `min_time` argument (this segment's
+        'min_decode_time', or None) -- run_length_encoding.decode_events'
+        own signature.
     flush_state_fn: Function that flushes the final decoding state into the
         result.
 
@@ -90,12 +106,30 @@ def decode_and_combine_predictions(
         predictions.
     total_dropped_events: Total number of dropped event tokens across all
         predictions.
+    total_suppressed_events: Total number of events withheld by a
+        per-segment min_time head crop, across all predictions. Always 0
+        when no prediction supplies 'min_decode_time'.
   """
   sorted_predictions = sorted(predictions, key=lambda pred: pred['start_time'])
+
+  # sorted_predictions is ordered by start_time; min_decode_time (where
+  # supplied) must agree with that ordering, since the crop logic below
+  # assumes segment k+1's min_decode_time is where segment k's kept region
+  # should end.
+  prev_min_decode_time = None
+  for pred in sorted_predictions:
+    min_decode_time = pred.get('min_decode_time')
+    if min_decode_time is not None:
+      if prev_min_decode_time is not None and min_decode_time < prev_min_decode_time:
+        raise ValueError(
+            'predictions are not consistently ordered by min_decode_time: '
+            f'{prev_min_decode_time} then {min_decode_time}')
+      prev_min_decode_time = min_decode_time
 
   state = init_state_fn()
   total_invalid_events = 0
   total_dropped_events = 0
+  total_suppressed_events = 0
 
   for pred_idx, pred in enumerate(sorted_predictions):
     begin_segment_fn(state)
@@ -105,21 +139,24 @@ def decode_and_combine_predictions(
     # into segments for prediction, this could lead to overlap. To prevent
     # overlap issues, ensure that the current segment does not make any
     # predictions for the time period covered by the subsequent segment.
-    max_decode_time = None
     if pred_idx < len(sorted_predictions) - 1:
-      max_decode_time = sorted_predictions[pred_idx + 1]['start_time']
+      next_pred = sorted_predictions[pred_idx + 1]
+      max_decode_time = next_pred.get('min_decode_time', next_pred['start_time'])
+    else:
+      # No next segment to tile against: fall back to this segment's own
+      # explicit cap, if the caller supplied one.
+      max_decode_time = pred.get('max_decode_time')
 
-    # decode_tokens_fn's third return value (suppressed_events) is always 0
-    # here: no caller of decode_and_combine_predictions passes a per-segment
-    # min_time yet, so decode_events' min_time defaults to None and never
-    # suppresses anything.
-    invalid_events, dropped_events, _ = decode_tokens_fn(
-        state, pred['est_tokens'], pred['start_time'], max_decode_time)
+    invalid_events, dropped_events, suppressed_events = decode_tokens_fn(
+        state, pred['est_tokens'], pred['start_time'], max_decode_time,
+        min_time=pred.get('min_decode_time'))
 
     total_invalid_events += invalid_events
     total_dropped_events += dropped_events
+    total_suppressed_events += suppressed_events
 
-  return flush_state_fn(state), total_invalid_events, total_dropped_events
+  return (flush_state_fn(state), total_invalid_events, total_dropped_events,
+          total_suppressed_events)
 
 
 def event_predictions_to_ns(
@@ -127,15 +164,16 @@ def event_predictions_to_ns(
     encoding_spec: note_sequences.NoteEncodingSpecType
 ) -> Mapping[str, Any]:
   """Convert a sequence of predictions to a combined NoteSequence."""
-  ns, total_invalid_events, total_dropped_events = decode_and_combine_predictions(
-      predictions=predictions,
-      init_state_fn=encoding_spec.init_decoding_state_fn,
-      begin_segment_fn=encoding_spec.begin_decoding_segment_fn,
-      decode_tokens_fn=functools.partial(
-          run_length_encoding.decode_events,
-          codec=codec,
-          decode_event_fn=encoding_spec.decode_event_fn),
-      flush_state_fn=encoding_spec.flush_decoding_state_fn)
+  (ns, total_invalid_events, total_dropped_events,
+   total_suppressed_events) = decode_and_combine_predictions(
+       predictions=predictions,
+       init_state_fn=encoding_spec.init_decoding_state_fn,
+       begin_segment_fn=encoding_spec.begin_decoding_segment_fn,
+       decode_tokens_fn=functools.partial(
+           run_length_encoding.decode_events,
+           codec=codec,
+           decode_event_fn=encoding_spec.decode_event_fn),
+       flush_state_fn=encoding_spec.flush_decoding_state_fn)
 
   # Also concatenate raw inputs from all predictions.
   sorted_predictions = sorted(predictions, key=lambda pred: pred['start_time'])
@@ -149,6 +187,7 @@ def event_predictions_to_ns(
       'est_ns': ns,
       'est_invalid_events': total_invalid_events,
       'est_dropped_events': total_dropped_events,
+      'est_suppressed_events': total_suppressed_events,
   }
 
 
