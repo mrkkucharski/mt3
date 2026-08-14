@@ -19,6 +19,7 @@ import itertools
 
 from typing import List, MutableMapping, MutableSet, Optional, Sequence, Tuple
 
+from absl import logging
 from mt3 import event_codec
 from mt3 import general_midi
 from mt3 import run_length_encoding
@@ -31,6 +32,14 @@ DEFAULT_NOTE_DURATION = 0.01
 
 # Quantization can result in zero-length notes; enforce a minimum duration.
 MIN_NOTE_DURATION = 0.01
+
+# A note this long, force-closed at end-of-decode, is likely a dropped
+# note-off rather than a real sustained note -- flag it rather than silently
+# emitting an implausible note. Most relevant once lookback (see
+# WindowGeometry) discards the tie section as a safety net: with it gone,
+# a note's offset relies entirely on a later window's note-off event ever
+# being decoded correctly.
+LONG_HELD_NOTE_WARNING_SECONDS = 30.0
 
 
 @dataclasses.dataclass
@@ -359,6 +368,13 @@ class NoteDecodingState:
       default_factory=set)
   # whether or not we are in the tie section at the beginning of a segment
   is_tie_section: bool = False
+  # set externally, per event, by run_length_encoding.decode_events when it
+  # is given a min_time (lookback): true for an event that falls before the
+  # window's kept region and must not affect note_sequence/active_pitches,
+  # even though it still runs through decode_note_event so sticky state
+  # (current_program/current_velocity/current_rhythm) stays correct for the
+  # first kept event. Always false for a decode with no min_time.
+  suppress: bool = False
   # partially-decoded NoteSequence
   note_sequence: note_seq.NoteSequence = dataclasses.field(
       default_factory=lambda: note_seq.NoteSequence(ticks_per_quarter=220))
@@ -406,11 +422,26 @@ def decode_note_event(
     codec: event_codec.Codec
 ) -> None:
   """Process note event and update decoding state."""
-  if time < state.current_time:
-    raise ValueError('event time < current time, %f < %f' % (
-        time, state.current_time))
-  state.current_time = time
+  if not state.suppress:
+    # A suppressed event's time is by construction earlier than wherever
+    # `state` has already advanced to (the previous window's kept region
+    # covered up through this window's min_time), so it would fail this
+    # monotonicity check spuriously; skip both the check and the advance
+    # for it. Monotonicity resumes automatically at the first kept event,
+    # since the previous window could not have committed anything at or
+    # past this window's min_time (see run_length_encoding.decode_events'
+    # half-open [min_time, max_time) interval).
+    if time < state.current_time:
+      raise ValueError('event time < current time, %f < %f' % (
+          time, state.current_time))
+    state.current_time = time
   if event.type == 'pitch':
+    if state.suppress:
+      # This onset/offset was already committed by an earlier window's
+      # kept region -- active_pitches already reflects it (or its closure).
+      # Re-applying it here would double-commit an onset, or raise on a
+      # note-off for a pitch that has since legitimately closed.
+      return
     pitch = event.value
     key = (pitch, state.current_program, state.current_rhythm)
     if state.is_tie_section:
@@ -447,6 +478,9 @@ def decode_note_event(
             program=state.current_program, rhythm=state.current_rhythm)
       state.active_pitches[key] = (time, state.current_velocity)
   elif event.type == 'drum':
+    if state.suppress:
+      # Already added to note_sequence by an earlier window's kept region.
+      return
     # drum onset (drums have no offset)
     if state.current_velocity == 0:
       raise ValueError('velocity cannot be zero for drum event')
@@ -466,6 +500,15 @@ def decode_note_event(
     # rhythm flag change
     state.current_rhythm = bool(event.value)
   elif event.type == 'tie':
+    if state.suppress:
+      # The tie section describes what's sounding at the window's first
+      # frame, lookback_frames before min_time -- not at the kept region's
+      # start, which is what active_pitches (carried over from the
+      # previous window's kept region ending exactly there) already
+      # reflects correctly. Discard it: closing "untied" notes here would
+      # spuriously cut off a note that is legitimately still sounding.
+      state.is_tie_section = False
+      return
     # end of tie section; end active notes that weren't declared tied
     if not state.is_tie_section:
       raise ValueError('tie section end event when not in tie section')
@@ -498,6 +541,12 @@ def flush_note_decoding_state(
   for (pitch, program, rhythm) in list(state.active_pitches.keys()):
     onset_time, onset_velocity = state.active_pitches.pop(
         (pitch, program, rhythm))
+    if state.current_time - onset_time > LONG_HELD_NOTE_WARNING_SECONDS:
+      logging.warning(
+          'Force-closing a note held open for %.1fs at end of decode '
+          '(pitch=%d, program=%d) -- likely a dropped note-off rather '
+          'than a real sustained note.',
+          state.current_time - onset_time, pitch, program)
     _add_note_to_sequence(
         state, start_time=onset_time, end_time=state.current_time,
         pitch=pitch, velocity=onset_velocity, program=program, rhythm=rhythm)
