@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -220,9 +221,20 @@ def _windowed_input_dataset(
 
 
 def _quantize(t: float, codec) -> float:
-  """Floors `t` onto the codec's own step grid (multiples of 1/steps_per_second)."""
-  step = 1 / codec.steps_per_second
-  return t - t % step
+  """Floors `t` onto the codec's own step grid (multiples of 1/steps_per_second).
+
+  Computed via floor(t * steps_per_second) / steps_per_second, not the
+  more obvious `t - t % step`: floating-point modulo of `t` against a step
+  like 0.01 (not exactly representable in binary) routinely lands a hair
+  below zero for a `t` that is decimally an exact multiple -- e.g.
+  `5.0 % 0.01` is ~0.00999999999999990, not 0.0 -- which then floors a
+  whole extra step, e.g. 5.0 down to 4.99. A tiny epsilon before flooring
+  absorbs that noise while being far too small to affect any genuine
+  non-boundary `t` (codec steps are >= 0.01s, 7+ orders of magnitude
+  larger than the epsilon).
+  """
+  steps = math.floor(t * codec.steps_per_second + 1e-9)
+  return steps / codec.steps_per_second
 
 
 def _min_decode_time(start_time: float, geometry: WindowGeometry, codec,
@@ -484,6 +496,6 @@ class Transcriber:
         hop_frames=self.hop_frames,
         lookback_seconds=self.geometry.seconds(
             self.geometry.lookback_frames, self.spectrogram_config),
-        lookahead_seconds=(
-            self.lookahead_frames / self.spectrogram_config.frames_per_second),
+        lookahead_seconds=self.geometry.seconds(
+            self.geometry.lookahead_frames, self.spectrogram_config),
         cost_multiplier=window_frames / self.hop_frames)
