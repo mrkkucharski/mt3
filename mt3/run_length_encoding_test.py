@@ -123,6 +123,16 @@ def _fake_decode_event_fn(state, time, event, codec):
   state.log.append((time, event.value, state.suppress))
 
 
+def _fake_decode_event_fn_raising_for_value(bad_value):
+  """A decode_event_fn that raises ValueError for one specific event value."""
+  def fn(state, time, event, codec):
+    del codec  # unused
+    if event.value == bad_value:
+      raise ValueError(f'invalid event value {event.value}')
+    state.log.append((time, event.value, state.suppress))
+  return fn
+
+
 _rle_codec = event_codec.Codec(
     max_shift_steps=100,
     steps_per_second=100,
@@ -188,6 +198,19 @@ class DecodeEventsTest(tf.test.TestCase):
     self.assertEqual(suppressed, 0)
     # state.suppress is untouched (never set) when min_time is None.
     self.assertEqual([s for _, _, s in state.log], [False, False])
+
+  def test_invalid_event_before_min_time_counts_only_as_invalid(self):
+    # An event that is both before min_time and invalid must not be
+    # double-counted in both invalid_events and suppressed_events.
+    state = _FakeDecodingState()
+    tokens = [_shift(50), _note(99)]  # cur_time=0.5 < min_time=1.0
+    invalid, dropped, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=None,
+        codec=_rle_codec,
+        decode_event_fn=_fake_decode_event_fn_raising_for_value(99),
+        min_time=1.0)
+    self.assertEqual(state.log, [])
+    self.assertEqual((invalid, dropped, suppressed), (1, 0, 0))
 
   def test_min_time_and_max_time_form_half_open_kept_interval(self):
     # [min_time, max_time): an event exactly at min_time is kept, an event

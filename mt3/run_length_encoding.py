@@ -440,8 +440,6 @@ def decode_events(
       cur_steps = 0
       if min_time is not None:
         state.suppress = cur_time < min_time
-        if state.suppress:
-          suppressed_events += 1
       try:
         decode_event_fn(state, cur_time, event, codec)
       except ValueError:
@@ -451,4 +449,9 @@ def decode_events(
             'Invalid event counter now at %d.',
             event, cur_time, invalid_events, exc_info=True)
         continue
+      # Only count an event as suppressed once it has actually been decoded
+      # successfully -- an event that is both before min_time and invalid
+      # belongs in invalid_events alone, not double-counted in both.
+      if min_time is not None and state.suppress:
+        suppressed_events += 1
   return invalid_events, dropped_events, suppressed_events
