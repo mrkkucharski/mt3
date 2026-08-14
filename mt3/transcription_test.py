@@ -125,12 +125,6 @@ class TranscriberGeometryValidationTest(tf.test.TestCase):
         transcription.Transcriber(
             ckpt, input_length=256, lookahead_frames=256)
 
-  def test_nonzero_lookback_frames_raises_not_implemented(self):
-    with tempfile.TemporaryDirectory() as ckpt:
-      with self.assertRaisesRegex(
-          NotImplementedError, 'lookback_frames is not yet wired'):
-        transcription.Transcriber(ckpt, input_length=256, lookback_frames=64)
-
   def test_missing_checkpoint_raises_before_geometry_validation(self):
     with self.assertRaises(FileNotFoundError):
       transcription.Transcriber(
@@ -271,6 +265,77 @@ class WindowedInputDatasetTest(tf.test.TestCase):
       end = min(start + geometry.keep_frames, num_orig_frames)
       want = orig_frames[start:end]
       self.assertAllClose(kept[:len(want)], want, msg=i)
+
+
+class _FakeCodec:
+
+  def __init__(self, steps_per_second):
+    self.steps_per_second = steps_per_second
+
+
+class _FakeSpectrogramConfig:
+
+  def __init__(self, frames_per_second, sample_rate=16000):
+    self.frames_per_second = frames_per_second
+    self.sample_rate = sample_rate
+
+
+class QuantizeTest(tf.test.TestCase):
+
+  def test_floors_onto_the_codec_step_grid(self):
+    codec = _FakeCodec(steps_per_second=100)  # step = 0.01s
+    self.assertAlmostEqual(transcription._quantize(0.017, codec), 0.01)
+    self.assertAlmostEqual(transcription._quantize(0.02, codec), 0.02)
+    self.assertAlmostEqual(transcription._quantize(0.0, codec), 0.0)
+
+
+class MinDecodeTimeTest(tf.test.TestCase):
+
+  def test_zero_lookback_reproduces_start_time(self):
+    geometry = transcription.WindowGeometry(window_frames=256)
+    codec = _FakeCodec(steps_per_second=100)
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertAlmostEqual(
+        transcription._min_decode_time(0.32, geometry, codec, spec), 0.32)
+
+  def test_adds_and_quantizes_lookback_seconds(self):
+    # lookback_frames=125 at 125 fps -> 1.0s of lookback.
+    geometry = transcription.WindowGeometry(
+        window_frames=500, lookback_frames=125, lookahead_frames=125)
+    codec = _FakeCodec(steps_per_second=100)  # step = 0.01s
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertAlmostEqual(
+        transcription._min_decode_time(0.32, geometry, codec, spec), 1.32)
+
+  def test_negative_start_time_from_window_zero_padding(self):
+    # Window 0 with lookback has a negative start_time (its own first
+    # frame is in the artificial silence pad); min_decode_time should land
+    # at or near true audio time 0.
+    geometry = transcription.WindowGeometry(
+        window_frames=500, lookback_frames=125, lookahead_frames=125)
+    codec = _FakeCodec(steps_per_second=100)
+    spec = _FakeSpectrogramConfig(frames_per_second=125)
+    self.assertAlmostEqual(
+        transcription._min_decode_time(-1.0, geometry, codec, spec), 0.0)
+
+
+class CapLastSegmentTailTest(tf.test.TestCase):
+
+  def test_caps_the_chronologically_last_prediction(self):
+    predictions = [
+        {'start_time': 0.0},
+        {'start_time': 2.0},
+        {'start_time': 1.0},
+    ]
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=2.5)
+    self.assertNotIn('max_decode_time', predictions[0])
+    self.assertNotIn('max_decode_time', predictions[2])
+    self.assertEqual(predictions[1]['max_decode_time'], 2.5)
+
+  def test_empty_predictions_is_a_noop(self):
+    predictions = []
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=2.5)
+    self.assertEqual(predictions, [])
 
 
 if __name__ == '__main__':
