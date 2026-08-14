@@ -288,6 +288,14 @@ class QuantizeTest(tf.test.TestCase):
     self.assertAlmostEqual(transcription._quantize(0.02, codec), 0.02)
     self.assertAlmostEqual(transcription._quantize(0.0, codec), 0.0)
 
+  def test_exact_multiples_are_not_floored_down_a_whole_extra_step(self):
+    # Regression test: `t - t % step` looks equivalent but isn't -- `5.0 %
+    # 0.01` in floating point is ~0.00999999999999990, not 0.0, since 0.01
+    # has no exact binary representation. That floors 5.0 down to 4.99.
+    codec = _FakeCodec(steps_per_second=100)
+    for t in (5.0, 4.5, 6.5, 8.5, 9.0):
+      self.assertEqual(transcription._quantize(t, codec), t, msg=t)
+
 
 class MinDecodeTimeTest(tf.test.TestCase):
 
