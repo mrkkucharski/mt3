@@ -44,6 +44,60 @@ TARGET_LENGTH = 1024
 
 
 @dataclass(frozen=True)
+class WindowGeometry:
+  """Describes how an encoder window splits into [lookback | keep | lookahead].
+
+  ``keep`` (== ``hop_frames``) is the region whose decoded output is
+  actually kept; ``lookback``/``lookahead`` are overlap-only context
+  discarded after decoding (see MT3_HEADCROP_OVERLAP_PLAN.md for the
+  lookahead half of this; lookback is its mirror on the other side of the
+  window).
+
+  ``lookback_frames=0, lookahead_frames=0`` reproduces the original
+  non-overlapping baseline exactly: ``keep_frames == window_frames`` and
+  ``cost_multiplier == 1.0``.
+
+  Frames are the primitive; seconds are derived via ``.seconds()`` using
+  ``spectrograms.SpectrogramConfig.frames_per_second`` (125 at the fixed
+  16 kHz / 128-sample-hop defaults). Converting a requested seconds value
+  into frames is the caller's job (e.g. the CLI), since only the caller
+  knows whether truncation to the frame grid is acceptable.
+  """
+  window_frames: int
+  lookback_frames: int = 0
+  lookahead_frames: int = 0
+
+  def __post_init__(self):
+    if self.lookback_frames < 0:
+      raise ValueError(
+          f'lookback_frames must be >= 0; got {self.lookback_frames}')
+    if self.lookahead_frames < 0:
+      raise ValueError(
+          f'lookahead_frames must be >= 0; got {self.lookahead_frames}')
+    if self.lookback_frames + self.lookahead_frames >= self.window_frames:
+      raise ValueError(
+          f'window_frames={self.window_frames} leaves no kept region: '
+          f'lookback_frames={self.lookback_frames} + '
+          f'lookahead_frames={self.lookahead_frames} >= '
+          f'{self.window_frames}')
+
+  @property
+  def keep_frames(self) -> int:
+    return self.window_frames - self.lookback_frames - self.lookahead_frames
+
+  @property
+  def hop_frames(self) -> int:
+    return self.keep_frames
+
+  @property
+  def cost_multiplier(self) -> float:
+    return self.window_frames / self.keep_frames
+
+  def seconds(self, frames: int, spectrogram_config) -> float:
+    return frames / spectrogram_config.frames_per_second
+
+
+@dataclass(frozen=True)
 class TranscriptionResult:
   """Summary of a completed multi-instrument transcription."""
 
@@ -104,30 +158,39 @@ class Transcriber:
   ``lookahead_frames`` (MT3_HEADCROP_OVERLAP_PLAN.md) requests that many
   spectrogram frames of right-context lookahead per window, by overlapping
   consecutive windows and discarding the lookahead portion of each window's
-  decoded output (see metrics_utils.decode_and_combine_predictions). It is
-  expressed in frames rather than seconds because it must divide evenly into
-  the checkpoint's own frame grid; convert via
-  spectrograms.SpectrogramConfig().frames_per_second (125 at the defaults) to
-  go from seconds. 0 (the default) reproduces the original non-overlapping
-  baseline exactly.
+  decoded output (see metrics_utils.decode_and_combine_predictions).
+  ``lookback_frames`` is the same idea mirrored onto the left of the window
+  (left-context). Both are expressed in frames rather than seconds because
+  they must divide evenly into the checkpoint's own frame grid; convert via
+  spectrograms.SpectrogramConfig().frames_per_second (125 at the defaults)
+  to go from seconds. 0 for both (the default) reproduces the original
+  non-overlapping baseline exactly.
   """
 
   def __init__(self,
                checkpoint_path: str | Path,
                input_length: int = INPUT_LENGTH,
                target_length: int = TARGET_LENGTH,
-               lookahead_frames: int = 0):
+               lookahead_frames: int = 0,
+               lookback_frames: int = 0):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
-    if not 0 <= lookahead_frames < input_length:
-      raise ValueError(
-          f'lookahead_frames must be in [0, {input_length}); got '
-          f'{lookahead_frames}')
+    self.geometry = WindowGeometry(
+        window_frames=input_length,
+        lookback_frames=lookback_frames,
+        lookahead_frames=lookahead_frames)
+    if lookback_frames != 0:
+      # _dataset() and the decode path don't yet honor a left-shifted
+      # window; a value that isn't honored must not silently produce wrong
+      # output.
+      raise NotImplementedError(
+          'lookback_frames is not yet wired through Transcriber; got '
+          f'{lookback_frames}')
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
     self.lookahead_frames = lookahead_frames
-    self.hop_frames = input_length - lookahead_frames
+    self.hop_frames = self.geometry.hop_frames
     self.partitioner = partitioning.PjitPartitioner(num_partitions=1)
     self.spectrogram_config = spectrograms.SpectrogramConfig()
     self.codec = vocabularies.build_codec(
