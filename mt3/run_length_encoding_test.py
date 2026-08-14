@@ -103,5 +103,114 @@ class RunLengthEncodingTest(tf.test.TestCase):
     np.testing.assert_array_equal(expected_merged_targets, merged_targets)
 
 
+class _FakeDecodingState:
+  """A minimal decoding state for exercising decode_events() without note_sequences.py.
+
+  decode_events' min_time/suppress contract is generic (it signals via a
+  plain `state.suppress` attribute, not anything note-specific), so it can
+  and should be tested without NoteDecodingState.
+  """
+
+  def __init__(self):
+    self.suppress = False
+    # (cur_time, event.value, suppress-flag-at-call-time) for every non-shift
+    # event that reached decode_event_fn.
+    self.log = []
+
+
+def _fake_decode_event_fn(state, time, event, codec):
+  del codec  # unused
+  state.log.append((time, event.value, state.suppress))
+
+
+_rle_codec = event_codec.Codec(
+    max_shift_steps=100,
+    steps_per_second=100,
+    event_ranges=[event_codec.EventRange('note', 0, 127)])
+
+
+def _shift(steps):
+  return _rle_codec.encode_event(event_codec.Event('shift', steps))
+
+
+def _note(value):
+  return _rle_codec.encode_event(event_codec.Event('note', value))
+
+
+class DecodeEventsTest(tf.test.TestCase):
+
+  def test_min_time_none_preserves_legacy_half_open_at_max_time(self):
+    # Legacy (min_time=None) semantics: `cur_time > max_time` drops, so an
+    # event exactly at max_time is KEPT -- this must not change.
+    state = _FakeDecodingState()
+    tokens = [_shift(100), _note(1)]  # cur_time reaches exactly 1.0s
+    invalid, dropped, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=1.0,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn)
+    self.assertEqual(state.log, [(1.0, 1, False)])
+    self.assertEqual((invalid, dropped, suppressed), (0, 0, 0))
+
+  def test_max_time_zero_drops_rather_than_being_ignored(self):
+    # Regression test for the pre-lookback `if max_time and ...` truthiness
+    # bug: max_time=0.0 is falsy but must still be honored as a real bound.
+    state = _FakeDecodingState()
+    tokens = [_shift(5), _note(1)]  # cur_time reaches 0.05s > 0.0
+    invalid, dropped, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=0.0,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn)
+    self.assertEqual(state.log, [])
+    self.assertEqual(invalid, 0)
+    self.assertGreater(dropped, 0)
+    self.assertEqual(suppressed, 0)
+
+  def test_min_time_suppresses_prefix_and_counts_it(self):
+    state = _FakeDecodingState()
+    # cur_steps resets to 0 after every non-shift event, so reaching 1.3s
+    # for the second note (after the reset following the first note) takes
+    # two shift tokens: max_shift_steps=100 caps a single one at 1.0s.
+    tokens = [
+        _shift(50), _note(1),               # cur_time=0.5 < 1.0: suppressed
+        _shift(100), _shift(30), _note(2),  # cur_time=1.3 >= 1.0: kept
+    ]
+    invalid, dropped, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=None,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn,
+        min_time=1.0)
+    self.assertEqual(state.log, [(0.5, 1, True), (1.3, 2, False)])
+    self.assertEqual((invalid, dropped, suppressed), (0, 0, 1))
+
+  def test_suppressed_events_is_zero_when_min_time_is_none(self):
+    state = _FakeDecodingState()
+    tokens = [_shift(50), _note(1), _shift(80), _note(2)]
+    _, _, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=None,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn)
+    self.assertEqual(suppressed, 0)
+    # state.suppress is untouched (never set) when min_time is None.
+    self.assertEqual([s for _, _, s in state.log], [False, False])
+
+  def test_min_time_and_max_time_form_half_open_kept_interval(self):
+    # [min_time, max_time): an event exactly at min_time is kept, an event
+    # exactly at max_time is dropped -- the opposite of the min_time=None
+    # legacy boundary, which is exactly why this only applies when min_time
+    # is not None.
+    state = _FakeDecodingState()
+    # cur_steps resets after the first note, so reaching 2.0s for the
+    # second note takes two more shift tokens (max_shift_steps=100 caps a
+    # single one at 1.0s).
+    tokens = [
+        _shift(100), _note(1),               # cur_time=1.0 == min_time: kept
+        _shift(100), _shift(100), _note(2),  # cur_time=2.0 == max_time: dropped
+    ]
+    invalid, dropped, suppressed = run_length_encoding.decode_events(
+        state=state, tokens=tokens, start_time=0, max_time=2.0,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn,
+        min_time=1.0)
+    self.assertEqual(state.log, [(1.0, 1, False)])
+    self.assertEqual(invalid, 0)
+    self.assertGreater(dropped, 0)
+    self.assertEqual(suppressed, 0)
+
+
 if __name__ == '__main__':
   tf.test.main()

@@ -296,7 +296,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [25, 161, 50, 162]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -322,7 +322,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, 161, 25, 162]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -348,7 +348,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, 356, 161, 25, 229, 161]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -369,7 +369,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, 356, 161, 10, 161, 25, 229, 161]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -395,7 +395,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, 525, 356, 161, 15, 356, 394, 25, 525, 229, 161]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -425,7 +425,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, -1, 161, -2, 25, 162, 9999]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_events, dropped_events = run_length_encoding.decode_events(
+    invalid_events, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -451,7 +451,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [161, 25, 162]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=1.0, max_time=1.25,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -477,7 +477,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [5, 161, 30, 162]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=1.0, max_time=1.25,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)
@@ -498,7 +498,7 @@ class RunLengthEncodingTest(tf.test.TestCase):
     events = [25, 230, 50, 161]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=events, start_time=0, max_time=None,
         codec=codec, decode_event_fn=note_sequences.decode_note_onset_event)
     ns = note_sequences.flush_note_decoding_state(decoding_state)

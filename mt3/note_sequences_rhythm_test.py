@@ -67,7 +67,7 @@ def _round_trip(ns: note_seq.NoteSequence) -> note_seq.NoteSequence:
   tokens = _compress_shifts(tokens)
 
   decoding_state = note_sequences.NoteDecodingState()
-  invalid_ids, dropped_events = run_length_encoding.decode_events(
+  invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
       state=decoding_state, tokens=tokens, start_time=0, max_time=None,
       codec=CODEC, decode_event_fn=note_sequences.decode_note_event)
   assert invalid_ids == 0, f'{invalid_ids} invalid ids decoding {tokens}'
@@ -194,7 +194,7 @@ class RhythmRoundTripTest(tf.test.TestCase):
     tie_section_tokens = remaining[:remaining.index(tie_event_id) + 1]
 
     decoding_state = note_sequences.NoteDecodingState()
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=segment1_tokens, start_time=0.0,
         max_time=1.0, codec=CODEC,
         decode_event_fn=note_sequences.decode_note_event)
@@ -202,13 +202,13 @@ class RhythmRoundTripTest(tf.test.TestCase):
     self.assertEqual(0, dropped_events)
 
     note_sequences.begin_tied_pitches_section(decoding_state)
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=tie_section_tokens, start_time=1.0,
         max_time=None, codec=CODEC,
         decode_event_fn=note_sequences.decode_note_event)
     self.assertEqual(0, invalid_ids)
     self.assertEqual(0, dropped_events)
-    invalid_ids, dropped_events = run_length_encoding.decode_events(
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
         state=decoding_state, tokens=segment2_tokens, start_time=1.0,
         max_time=None, codec=CODEC,
         decode_event_fn=note_sequences.decode_note_event)

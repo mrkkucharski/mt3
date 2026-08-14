@@ -107,7 +107,11 @@ def decode_and_combine_predictions(
     if pred_idx < len(sorted_predictions) - 1:
       max_decode_time = sorted_predictions[pred_idx + 1]['start_time']
 
-    invalid_events, dropped_events = decode_tokens_fn(
+    # decode_tokens_fn's third return value (suppressed_events) is always 0
+    # here: no caller of decode_and_combine_predictions passes a per-segment
+    # min_time yet, so decode_events' min_time defaults to None and never
+    # suppresses anything.
+    invalid_events, dropped_events, _ = decode_tokens_fn(
         state, pred['est_tokens'], pred['start_time'], max_decode_time)
 
     total_invalid_events += invalid_events
