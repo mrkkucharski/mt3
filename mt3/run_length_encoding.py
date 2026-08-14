@@ -400,13 +400,16 @@ def decode_events(
         correctly to the first kept event), but `state` itself must
         recognize the suppressed range and withhold any note-emitting
         effect. Signaled to `state` via a mutable `state.suppress`
-        attribute, set immediately before every `decode_event_fn` call
-        while min_time is not None (true for the still-suppressed prefix,
-        false from the first kept event onward). None (the default)
-        disables suppression entirely -- `state.suppress` is left
-        untouched -- for callers with no left-context overlap to crop; a
-        `state` type only needs to define `suppress` if some caller in its
-        lifetime ever passes a non-None min_time.
+        attribute, set immediately before every `decode_event_fn` call to
+        `min_time is not None and cur_time < min_time` -- true for the
+        still-suppressed prefix, false from the first kept event onward,
+        and always false when min_time is None. Always assigned (never
+        left untouched), so a `state` reused across calls can't carry a
+        stale True from an earlier min_time-bearing call into one with
+        min_time=None; a `state` type must define `suppress` if it is ever
+        passed to a call with `decode_event_fn`s that read it, but every
+        `state` object decode_events itself runs against gets the
+        attribute set here regardless.
 
   Returns:
     invalid_events: number of events that could not be decoded.
@@ -441,8 +444,14 @@ def decode_events(
           break
     else:
       cur_steps = 0
-      if min_time is not None:
-        state.suppress = cur_time < min_time
+      # Always assigned (not just when min_time is not None), so
+      # state.suppress can never leak a stale True from a previous
+      # min_time-bearing call into this one: a caller that reuses one
+      # `state` across a min_time=X call and then a min_time=None call
+      # (e.g. a decode with no lookback) gets a correctly-reset False here,
+      # rather than every subsequent event being silently treated as
+      # suppressed.
+      state.suppress = min_time is not None and cur_time < min_time
       try:
         decode_event_fn(state, cur_time, event, codec)
       except ValueError:
@@ -455,6 +464,6 @@ def decode_events(
       # Only count an event as suppressed once it has actually been decoded
       # successfully -- an event that is both before min_time and invalid
       # belongs in invalid_events alone, not double-counted in both.
-      if min_time is not None and state.suppress:
+      if state.suppress:
         suppressed_events += 1
   return invalid_events, dropped_events, suppressed_events

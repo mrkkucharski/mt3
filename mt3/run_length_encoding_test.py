@@ -234,6 +234,24 @@ class DecodeEventsTest(tf.test.TestCase):
     self.assertGreater(dropped, 0)
     self.assertEqual(suppressed, 0)
 
+  def test_suppress_does_not_leak_stale_into_a_later_min_time_none_call(self):
+    # A state reused across a min_time=X call (whose last event ends
+    # suppressed) and then a min_time=None call must not carry state.suppress
+    # over as a stale True -- every event in the second call must decode
+    # normally.
+    state = _FakeDecodingState()
+    run_length_encoding.decode_events(
+        state=state, tokens=[_note(1)], start_time=0, max_time=None,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn,
+        min_time=1.0)  # cur_time=0.0 < min_time=1.0: ends suppressed=True.
+    self.assertTrue(state.suppress)
+
+    state.log.clear()
+    run_length_encoding.decode_events(
+        state=state, tokens=[_note(2)], start_time=5.0, max_time=None,
+        codec=_rle_codec, decode_event_fn=_fake_decode_event_fn)
+    self.assertEqual(state.log, [(5.0, 2, False)])
+
 
 if __name__ == '__main__':
   tf.test.main()
