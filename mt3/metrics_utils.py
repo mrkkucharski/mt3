@@ -61,7 +61,7 @@ def decode_and_combine_predictions(
     init_state_fn: Callable[[], S],
     begin_segment_fn: Callable[[S], None],
     decode_tokens_fn: Callable[[S, Sequence[int], int, Optional[int]],
-                               Tuple[int, int]],
+                               Tuple[int, int, int]],
     flush_state_fn: Callable[[S], T]
 ) -> Tuple[T, int, int]:
   """Decode and combine a sequence of predictions to a full result.
@@ -77,8 +77,10 @@ def decode_and_combine_predictions(
         of a segment.
     decode_tokens_fn: Function that takes a decoding state, estimated tokens
         (for a single segment), start time, and max time, and processes the
-        tokens, updating the decoding state in place. Also returns the number of
-        invalid and dropped events for the segment.
+        tokens, updating the decoding state in place. Also returns the number
+        of invalid, dropped, and suppressed events for the segment (the third
+        value is unused here -- no caller of decode_and_combine_predictions
+        threads a per-segment min_time yet, so it is always 0).
     flush_state_fn: Function that flushes the final decoding state into the
         result.
 
@@ -107,7 +109,11 @@ def decode_and_combine_predictions(
     if pred_idx < len(sorted_predictions) - 1:
       max_decode_time = sorted_predictions[pred_idx + 1]['start_time']
 
-    invalid_events, dropped_events = decode_tokens_fn(
+    # decode_tokens_fn's third return value (suppressed_events) is always 0
+    # here: no caller of decode_and_combine_predictions passes a per-segment
+    # min_time yet, so decode_events' min_time defaults to None and never
+    # suppresses anything.
+    invalid_events, dropped_events, _ = decode_tokens_fn(
         state, pred['est_tokens'], pred['start_time'], max_decode_time)
 
     total_invalid_events += invalid_events

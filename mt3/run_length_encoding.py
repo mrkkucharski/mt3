@@ -376,24 +376,47 @@ def decode_events(
     codec: event_codec.Codec,
     decode_event_fn: Callable[[DS, float, event_codec.Event, event_codec.Codec],
                               None],
-) -> Tuple[int, int]:
+    min_time: Optional[int] = None,
+) -> Tuple[int, int, int]:
   """Decode a series of tokens, maintaining a decoding state object.
 
   Args:
     state: Decoding state object; will be modified in-place.
     tokens: event tokens to convert.
     start_time: offset start time if decoding in the middle of a sequence.
-    max_time: Events at or beyond this time will be dropped.
+    max_time: Events at or beyond this time will be dropped. (When min_time
+        is also given, the kept interval is the half-open [min_time,
+        max_time) -- an event exactly at max_time is dropped, matching the
+        next segment's min_time picking it up instead. When min_time is
+        None, the legacy `cur_time > max_time` test is used instead, so the
+        no-lookback caller sees exactly the same boundary behavior as
+        before this argument existed.)
     codec: An event_codec.Codec object that maps indices to Event objects.
     decode_event_fn: Function that consumes an Event (and the current time) and
         updates the decoding state.
+    min_time: Events before this time are suppressed rather than committed
+        to `state` -- they still run through `decode_event_fn` (so sticky
+        run-length state like program/velocity/rhythm carries over
+        correctly to the first kept event), but `state` itself must
+        recognize the suppressed range and withhold any note-emitting
+        effect. Signaled to `state` via a mutable `state.suppress`
+        attribute, set immediately before every `decode_event_fn` call
+        while min_time is not None (true for the still-suppressed prefix,
+        false from the first kept event onward). None (the default)
+        disables suppression entirely -- `state.suppress` is left
+        untouched -- for callers with no left-context overlap to crop; a
+        `state` type only needs to define `suppress` if some caller in its
+        lifetime ever passes a non-None min_time.
 
   Returns:
     invalid_events: number of events that could not be decoded.
     dropped_events: number of events dropped due to max_time restriction.
+    suppressed_events: number of events withheld because they fell before
+        min_time.
   """
   invalid_events = 0
   dropped_events = 0
+  suppressed_events = 0
   cur_steps = 0
   cur_time = start_time
   token_idx = 0
@@ -406,11 +429,20 @@ def decode_events(
     if event.type == 'shift':
       cur_steps += event.value
       cur_time = start_time + cur_steps / codec.steps_per_second
-      if max_time and cur_time > max_time:
-        dropped_events = len(tokens) - token_idx
-        break
+      # Half-open [min_time, max_time) once min_time is in play (so a
+      # boundary event isn't double-committed by both this segment and the
+      # next one's min_time); the legacy min_time=None caller keeps the
+      # original inclusive-at-max_time boundary untouched.
+      if max_time is not None:
+        at_or_past_max_time = (
+            cur_time >= max_time if min_time is not None else cur_time > max_time)
+        if at_or_past_max_time:
+          dropped_events = len(tokens) - token_idx
+          break
     else:
       cur_steps = 0
+      if min_time is not None:
+        state.suppress = cur_time < min_time
       try:
         decode_event_fn(state, cur_time, event, codec)
       except ValueError:
@@ -420,4 +452,9 @@ def decode_events(
             'Invalid event counter now at %d.',
             event, cur_time, invalid_events, exc_info=True)
         continue
-  return invalid_events, dropped_events
+      # Only count an event as suppressed once it has actually been decoded
+      # successfully -- an event that is both before min_time and invalid
+      # belongs in invalid_events alone, not double-counted in both.
+      if min_time is not None and state.suppress:
+        suppressed_events += 1
+  return invalid_events, dropped_events, suppressed_events
