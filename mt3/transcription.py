@@ -142,6 +142,70 @@ def write_multitrack_midi(note_sequence: note_seq.NoteSequence,
   return len(note_sequence.notes)
 
 
+def _windowed_input_dataset(
+    audio: np.ndarray,
+    spectrogram_config,
+    geometry: 'WindowGeometry',
+) -> tf.data.Dataset:
+  """Frames `audio` and splits it into overlapping encoder windows per `geometry`.
+
+  Window k covers real audio starting at frame `k * geometry.keep_frames -
+  geometry.lookback_frames` (relative to the start of `audio`); to give
+  window 0 a full `lookback_frames` of left context without reusing any
+  real audio twice, `audio` is left-padded with that many frames of silence
+  before framing. `input_times` stays in ORIGINAL-audio time throughout --
+  the pad occupies frames `[-lookback_frames, 0)` -- rather than shifting
+  the whole timeline, so no downstream consumer needs to know the pad
+  happened.
+
+  Left-padding grows the total frame count, which can produce trailing
+  windows whose *kept* region starts at or past the end of the real audio
+  (pure silence, contributing nothing but wasted compute and a risk of
+  hallucinated events). Those are dropped here.
+
+  Args:
+    audio: mono audio samples.
+    spectrogram_config: a spectrograms.SpectrogramConfig.
+    geometry: the WindowGeometry describing the encoder window.
+
+  Returns:
+    A dataset of examples with 'inputs' (raw audio frames) and
+    'input_times' (original-audio-time timestamp of each frame),
+    windowed per `geometry`.
+  """
+  hop = spectrogram_config.hop_width
+  # Right-pad to a whole number of frames first, exactly as before this
+  # windowing became overlap-aware -- this only rounds the tail up to the
+  # frame grid, it is not the lookback/lookahead overlap padding.
+  audio = np.pad(audio, (0, (-len(audio)) % hop), mode='constant')
+  num_orig_frames = len(audio) // hop
+
+  lookback = geometry.lookback_frames
+  if lookback:
+    audio = np.pad(audio, (lookback * hop, 0), mode='constant')
+
+  frames = spectrograms.split_audio(audio, spectrogram_config)
+  frame_times = (
+      (np.arange(len(audio) // hop) - lookback)
+      / spectrogram_config.frames_per_second)
+  dataset = tf.data.Dataset.from_tensors(
+      {'inputs': frames, 'input_times': frame_times})
+  dataset = preprocessors.split_tokens_strided(
+      dataset,
+      window_tokens=geometry.window_frames,
+      hop_tokens=geometry.keep_frames,
+      feature_key='inputs',
+      additional_feature_keys=['input_times'])
+
+  if lookback:
+    lookback_seconds = lookback / spectrogram_config.frames_per_second
+    orig_duration_seconds = num_orig_frames / spectrogram_config.frames_per_second
+    dataset = dataset.filter(
+        lambda x: x['input_times'][0] + lookback_seconds < orig_duration_seconds)
+
+  return dataset
+
+
 class Transcriber:
   """A reusable MT3 multi-instrument inference model.
 
@@ -181,9 +245,11 @@ class Transcriber:
         lookback_frames=lookback_frames,
         lookahead_frames=lookahead_frames)
     if lookback_frames != 0:
-      # _dataset() and the decode path don't yet honor a left-shifted
-      # window; a value that isn't honored must not silently produce wrong
-      # output.
+      # _dataset() builds a correctly left-shifted window, but the decode
+      # side (metrics_utils.decode_and_combine_predictions crops segments
+      # using only each segment's start_time, with no notion of a
+      # per-segment kept-region start) doesn't honor one yet; a value that
+      # isn't honored end to end must not silently produce wrong output.
       raise NotImplementedError(
           'lookback_frames is not yet wired through Transcriber; got '
           f'{lookback_frames}')
@@ -273,17 +339,8 @@ class Transcriber:
         jax.random.PRNGKey(0))
 
   def _dataset(self, audio: np.ndarray) -> tf.data.Dataset:
-    hop = self.spectrogram_config.hop_width
-    audio = np.pad(audio, (0, (-len(audio)) % hop), mode='constant')
-    frames = spectrograms.split_audio(audio, self.spectrogram_config)
-    frame_times = np.arange(len(audio) // hop) / self.spectrogram_config.frames_per_second
-    dataset = tf.data.Dataset.from_tensors({'inputs': frames, 'input_times': frame_times})
+    dataset = _windowed_input_dataset(audio, self.spectrogram_config, self.geometry)
     chain = [
-        functools.partial(preprocessors.split_tokens_strided,
-                          window_tokens=self.sequence_length['inputs'],
-                          hop_tokens=self.hop_frames,
-                          feature_key='inputs',
-                          additional_feature_keys=['input_times']),
         preprocessors.add_dummy_targets,
         functools.partial(preprocessors.compute_spectrograms,
                           spectrogram_config=self.spectrogram_config),

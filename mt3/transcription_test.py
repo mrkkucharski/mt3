@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for transcription.WindowGeometry and the Transcriber constructor's
+"""Tests for transcription.WindowGeometry, _windowed_input_dataset, and the
 
-validation of it. WindowGeometry describes an encoder window as
-[lookback | keep | lookahead]; lookback_frames=0 must always reproduce the
-pre-lookback (lookahead-only) geometry exactly.
+Transcriber constructor's validation of them. WindowGeometry describes an
+encoder window as [lookback | keep | lookahead]; lookback_frames=0 must
+always reproduce the pre-lookback (lookahead-only) geometry exactly.
 """
 
+import math
 import tempfile
 
+import numpy as np
 import tensorflow as tf
+from mt3 import preprocessors
+from mt3 import spectrograms
 from mt3 import transcription
 
 
@@ -132,6 +136,141 @@ class TranscriberGeometryValidationTest(tf.test.TestCase):
       transcription.Transcriber(
           '/nonexistent/path/for/mt3/tests',
           input_length=256, lookahead_frames=999999)
+
+
+# Small integer analogs of the four requested real-world geometries, using
+# the default hop_width=128 frame grid; kept proportionally similar in
+# shape (symmetric overlap, larger-overlap-than-keep, asymmetric overlap,
+# no overlap) rather than literal second values, so tests build small
+# audio arrays and run fast.
+_TEST_GEOMETRIES = (
+    # (window_frames, lookback_frames, lookahead_frames)  -- like 1s/2s/1s
+    (20, 5, 5),
+    # like 1.5s/1s/1.5s: overlap on each side larger than the kept region
+    (20, 8, 8),
+    # like 1s/2.5s/0.5s: asymmetric, lookback > lookahead
+    (20, 5, 2),
+    # like 0s/4s/0s: no overlap at all
+    (20, 0, 0),
+)
+
+
+def _make_ramp_audio(num_frames: int, hop: int) -> np.ndarray:
+  """A distinguishable-from-silence signal: frame i's samples are all i+1."""
+  return np.repeat(np.arange(1, num_frames + 1, dtype=np.float32), hop)
+
+
+class WindowedInputDatasetTest(tf.test.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.spectrogram_config = spectrograms.SpectrogramConfig()
+    self.hop = self.spectrogram_config.hop_width
+    self.fps = self.spectrogram_config.frames_per_second
+
+  def test_lookback_zero_matches_pre_lookback_baseline(self):
+    # The compatibility anchor: lookback_frames=0 must reproduce exactly
+    # what a plain (non-left-padded) split_tokens_strided call produces.
+    for window, lookahead in [(20, 0), (20, 5), (16, 15)]:
+      for num_orig_frames in (7, 20, 41):
+        geometry = transcription.WindowGeometry(
+            window_frames=window, lookahead_frames=lookahead)
+        audio = _make_ramp_audio(num_orig_frames, self.hop)
+        got = list(
+            transcription._windowed_input_dataset(
+                audio, self.spectrogram_config, geometry
+            ).as_numpy_iterator())
+
+        frame_times = np.arange(num_orig_frames) / self.fps
+        ref_ds = tf.data.Dataset.from_tensors({
+            'inputs': audio.reshape(num_orig_frames, self.hop),
+            'input_times': frame_times,
+        })
+        want = list(
+            preprocessors.split_tokens_strided(
+                ref_ds, window_tokens=window, hop_tokens=geometry.keep_frames,
+                feature_key='inputs',
+                additional_feature_keys=['input_times']
+            ).as_numpy_iterator())
+
+        self.assertLen(got, len(want), msg=(window, lookahead, num_orig_frames))
+        for g, w in zip(got, want):
+          self.assertAllClose(g['inputs'], w['inputs'])
+          self.assertAllClose(g['input_times'], w['input_times'])
+
+
+  def test_window_zero_lookback_region_is_silent_and_negative_time(self):
+    for window, lookback, lookahead in _TEST_GEOMETRIES:
+      if lookback == 0:
+        continue
+      geometry = transcription.WindowGeometry(
+          window_frames=window, lookback_frames=lookback,
+          lookahead_frames=lookahead)
+      audio = _make_ramp_audio(50, self.hop)
+      windows = list(
+          transcription._windowed_input_dataset(
+              audio, self.spectrogram_config, geometry
+          ).as_numpy_iterator())
+      first = windows[0]
+      self.assertAllEqual(
+          first['inputs'][:lookback], np.zeros((lookback, self.hop), np.float32),
+          msg=(window, lookback, lookahead))
+      expected_times = (np.arange(lookback) - lookback) / self.fps
+      self.assertAllClose(
+          first['input_times'][:lookback], expected_times,
+          msg=(window, lookback, lookahead))
+      self.assertLess(first['input_times'][0], 0)
+
+  def test_kept_regions_tile_original_audio_with_no_gap_or_overlap(self):
+    for window, lookback, lookahead in _TEST_GEOMETRIES:
+      geometry = transcription.WindowGeometry(
+          window_frames=window, lookback_frames=lookback,
+          lookahead_frames=lookahead)
+      for num_orig_frames in (
+          geometry.keep_frames,  # exact multiple (1x)
+          geometry.keep_frames * 3,  # exact multiple (3x)
+          geometry.keep_frames * 2 + 3,  # not a multiple
+          3,  # shorter than one kept region
+      ):
+        audio = _make_ramp_audio(num_orig_frames, self.hop)
+        windows = list(
+            transcription._windowed_input_dataset(
+                audio, self.spectrogram_config, geometry
+            ).as_numpy_iterator())
+
+        expected_num_windows = math.ceil(num_orig_frames / geometry.keep_frames)
+        self.assertLen(
+            windows, expected_num_windows,
+            msg=(window, lookback, lookahead, num_orig_frames))
+
+        for i, w in enumerate(windows):
+          kept_start_frame = round(w['input_times'][0] * self.fps) + lookback
+          self.assertEqual(
+              kept_start_frame, i * geometry.keep_frames,
+              msg=(window, lookback, lookahead, num_orig_frames, i))
+
+  def test_kept_region_content_matches_original_audio(self):
+    # The frames inside a window's kept region (after skipping its own
+    # lookback prefix) must be exactly the corresponding slice of the
+    # original, un-padded audio -- not the left-pad, not another window's
+    # content.
+    window, lookback, lookahead = 20, 5, 2
+    geometry = transcription.WindowGeometry(
+        window_frames=window, lookback_frames=lookback,
+        lookahead_frames=lookahead)
+    num_orig_frames = 47
+    audio = _make_ramp_audio(num_orig_frames, self.hop)
+    windows = list(
+        transcription._windowed_input_dataset(
+            audio, self.spectrogram_config, geometry
+        ).as_numpy_iterator())
+    orig_frames = audio.reshape(num_orig_frames, self.hop)
+    for i, w in enumerate(windows):
+      kept = w['inputs'][lookback:lookback + geometry.keep_frames]
+      start = i * geometry.keep_frames
+      end = min(start + geometry.keep_frames, num_orig_frames)
+      want = orig_frames[start:end]
+      self.assertAllClose(kept[:len(want)], want, msg=i)
 
 
 if __name__ == '__main__':
