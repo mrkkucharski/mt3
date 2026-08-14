@@ -282,11 +282,25 @@ def _cap_last_segment_tail(predictions: list[dict], audio_duration_seconds: floa
   max_decode_time stays unbounded and a lookahead tail can decode events
   from the padding-only silence past the end of the file. No-op on an
   empty list.
+
+  The cap is nudged a hair past audio_duration_seconds rather than sitting
+  exactly on it. If this segment also has its own min_decode_time (true
+  whenever lookback_frames > 0), run_length_encoding.decode_events treats
+  max_time as the exclusive end of a half-open [min_time, max_time)
+  interval -- correct when max_time is the *next* segment's own
+  min_decode_time (that segment's min_time picks up anything at the exact
+  boundary instead), but there is no next segment here to do that. Without
+  the nudge, a real note ending at exactly the last frame of the file --
+  entirely plausible, not an edge case a real recording avoids -- would be
+  silently dropped instead of kept. The nudge is far smaller than a single
+  codec step, so it can't admit a genuinely hallucinated event from the
+  padding tail, which would need at least one full step past
+  audio_duration_seconds to be encoded at all.
   """
   if not predictions:
     return
   last = max(predictions, key=lambda pred: pred['start_time'])
-  last['max_decode_time'] = audio_duration_seconds
+  last['max_decode_time'] = audio_duration_seconds + 1e-6
 
 
 class Transcriber:
