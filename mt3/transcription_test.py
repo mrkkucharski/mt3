@@ -364,7 +364,25 @@ class CapLastSegmentTailTest(tf.test.TestCase):
     transcription._cap_last_segment_tail(predictions, audio_duration_seconds=2.5)
     self.assertNotIn('max_decode_time', predictions[0])
     self.assertNotIn('max_decode_time', predictions[2])
-    self.assertEqual(predictions[1]['max_decode_time'], 2.5)
+    self.assertAlmostEqual(predictions[1]['max_decode_time'], 2.5, delta=1e-5)
+
+  def test_cap_is_nudged_past_audio_duration_not_exactly_on_it(self):
+    # Regression test: a note whose true offset lands exactly at
+    # audio_duration_seconds must not be silently dropped. If the last
+    # segment also has its own min_decode_time (lookback_frames > 0),
+    # run_length_encoding.decode_events treats max_time as the EXCLUSIVE
+    # end of a half-open interval -- correct when max_time is the *next*
+    # segment's min_decode_time (nothing left over, since that segment's
+    # min_time picks it up instead), wrong here since there is no next
+    # segment to compensate.
+    predictions = [{'start_time': 0.0}]
+    transcription._cap_last_segment_tail(predictions, audio_duration_seconds=9.0)
+    self.assertGreater(predictions[0]['max_decode_time'], 9.0)
+    # ...but only a hair past it: a genuinely hallucinated event from the
+    # padding tail needs at least one full codec step (0.01s at the
+    # defaults) past audio_duration_seconds to be encoded at all, and must
+    # still be excluded.
+    self.assertLess(predictions[0]['max_decode_time'], 9.005)
 
   def test_empty_predictions_is_a_noop(self):
     predictions = []
