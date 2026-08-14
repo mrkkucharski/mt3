@@ -423,6 +423,12 @@ def decode_events(
   cur_steps = 0
   cur_time = start_time
   token_idx = 0
+  prefix_pending = False
+  if min_time is not None:
+    begin_suppressed_prefix = getattr(state, 'begin_suppressed_prefix', None)
+    if begin_suppressed_prefix is not None:
+      begin_suppressed_prefix(start_time)
+      prefix_pending = True
   for token_idx, token in enumerate(tokens):
     try:
       event = codec.decode_event_index(token)
@@ -452,6 +458,10 @@ def decode_events(
       # rather than every subsequent event being silently treated as
       # suppressed.
       state.suppress = min_time is not None and cur_time < min_time
+      if prefix_pending and not state.suppress:
+        assert min_time is not None
+        state.finish_suppressed_prefix(min_time)
+        prefix_pending = False
       try:
         decode_event_fn(state, cur_time, event, codec)
       except ValueError:
@@ -466,4 +476,10 @@ def decode_events(
       # belongs in invalid_events alone, not double-counted in both.
       if state.suppress:
         suppressed_events += 1
+  # A prediction may contain no non-shift event in its kept suffix.  Boundary
+  # reconciliation is still required; otherwise stale active notes survive
+  # merely because there was no event available to trigger the transition.
+  if prefix_pending:
+    assert min_time is not None
+    state.finish_suppressed_prefix(min_time)
   return invalid_events, dropped_events, suppressed_events
