@@ -429,13 +429,16 @@ def decode_events(
     if event.type == 'shift':
       cur_steps += event.value
       cur_time = start_time + cur_steps / codec.steps_per_second
-      if min_time is not None:
-        if max_time is not None and cur_time >= max_time:
+      # Half-open [min_time, max_time) once min_time is in play (so a
+      # boundary event isn't double-committed by both this segment and the
+      # next one's min_time); the legacy min_time=None caller keeps the
+      # original inclusive-at-max_time boundary untouched.
+      if max_time is not None:
+        at_or_past_max_time = (
+            cur_time >= max_time if min_time is not None else cur_time > max_time)
+        if at_or_past_max_time:
           dropped_events = len(tokens) - token_idx
           break
-      elif max_time is not None and cur_time > max_time:
-        dropped_events = len(tokens) - token_idx
-        break
     else:
       cur_steps = 0
       if min_time is not None:
