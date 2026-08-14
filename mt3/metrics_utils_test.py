@@ -328,6 +328,25 @@ class DecodeAndCombinePredictionsTest(tf.test.TestCase):
         (2.0, None, None),
     ])
 
+  def test_explicit_none_min_decode_time_falls_back_to_start_time(self):
+    # A caller that always includes 'min_decode_time' but sets it to None
+    # for a non-lookback segment (rather than omitting the key) must not
+    # leave the preceding segment's decode window unbounded.
+    calls = []
+    def fake_decode(state, tokens, start_time, max_time, min_time=None):
+      del state, tokens
+      calls.append((start_time, max_time, min_time))
+      return (0, 0, 0)
+    predictions = [
+        {'start_time': 0.0, 'est_tokens': [], 'min_decode_time': None},
+        {'start_time': 1.0, 'est_tokens': [], 'min_decode_time': None},
+    ]
+    self._run(predictions, fake_decode)
+    self.assertEqual(calls, [
+        (0.0, 1.0, None),
+        (1.0, None, None),
+    ])
+
   def test_min_decode_time_used_for_tiling_and_min_time(self):
     calls = []
     def fake_decode(state, tokens, start_time, max_time, min_time=None):

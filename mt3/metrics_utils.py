@@ -141,7 +141,15 @@ def decode_and_combine_predictions(
     # predictions for the time period covered by the subsequent segment.
     if pred_idx < len(sorted_predictions) - 1:
       next_pred = sorted_predictions[pred_idx + 1]
-      max_decode_time = next_pred.get('min_decode_time', next_pred['start_time'])
+      # dict.get's default only applies when the key is absent, not when
+      # it's present with value None -- a caller that always includes
+      # 'min_decode_time' but sets it to None for non-lookback segments
+      # must still fall back to start_time, or this segment's decode
+      # window goes unbounded and overlaps the next one.
+      next_min_decode_time = next_pred.get('min_decode_time')
+      max_decode_time = (
+          next_min_decode_time if next_min_decode_time is not None
+          else next_pred['start_time'])
     else:
       # No next segment to tile against: fall back to this segment's own
       # explicit cap, if the caller supplied one.
