@@ -101,9 +101,16 @@ def main(argv: list[str] | None = None) -> int:
   else:
     print(f'Wrote {result.output_path}: {result.note_count} predicted notes.')
     print(f'Programs: {list(result.programs)}; drum notes: {result.drum_note_count}.')
-    window_seconds = geometry.window_frames / _FRAMES_PER_SECOND
-    print(f'window {geometry.window_frames}f ({window_seconds:.2f}s) = '
-          f'{geometry.lookback_frames}f lookback + {geometry.keep_frames}f keep + '
-          f'{geometry.lookahead_frames}f lookahead, '
-          f'cost {geometry.cost_multiplier:.2f}x')
+    # From `result`, the geometry Transcriber actually ran with -- not the
+    # `geometry` object above, which exists only for pre-flight validation
+    # before a checkpoint is loaded. The two happen to agree today (both
+    # derive from the same kwargs via the same WindowGeometry constructor),
+    # but reading the executed result is the one that can't drift from what
+    # actually ran.
+    lookback_frames = round(result.lookback_seconds * _FRAMES_PER_SECOND)
+    window_seconds = result.window_frames / _FRAMES_PER_SECOND
+    print(f'window {result.window_frames}f ({window_seconds:.2f}s) = '
+          f'{lookback_frames}f lookback + {result.keep_frames}f keep + '
+          f'{round(result.lookahead_seconds * _FRAMES_PER_SECOND)}f lookahead, '
+          f'cost {result.cost_multiplier:.2f}x')
   return 0
