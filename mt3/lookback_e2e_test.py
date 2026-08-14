@@ -97,6 +97,11 @@ _TEST_GEOMETRIES = {
     '1s/2s/1s': (500, 125, 125),
     '1.4s/1s/1.4s': (475, 175, 175),
     '1s/2.4s/0.6s': (500, 125, 75),
+    # Lookback and lookahead in isolation: the module docstring claims this
+    # holds "lookback, lookahead, both, or neither" -- the four geometries
+    # above only ever combine the two (or use neither), never exactly one.
+    '1s/3s/0s (lookback only)': (500, 125, 0),
+    '0s/3s/1s (lookahead only)': (500, 0, 125),
 }
 
 
@@ -168,14 +173,21 @@ def _simulate_and_decode(ns: note_seq.NoteSequence, geometry: transcription.Wind
     content_start_time = max(0.0, window_start_time)
 
     start_idx = _frame_idx(content_start_time)
-    # Sliced up to the window's full nominal end, NOT clipped to
+    # Sliced a frame past the window's own nominal end, NOT clipped to
     # audio_duration: real audio has no events past audio_duration anyway
     # (nothing to spuriously include), and clipping the slice here would
     # cut off a real event landing exactly at audio_duration before
     # decode_events' own max_decode_time crop (_cap_last_segment_tail) ever
     # gets a chance to make that call -- exactly matching how a real
-    # window's audio isn't pre-truncated either.
-    end_idx = min(len(frame_times) - 1, _frame_idx(window_end_time))
+    # window's audio isn't pre-truncated either. The extra frame matters
+    # whenever window_end_time lands exactly on a real event's own time
+    # (always true for the last window under a lookahead=0 geometry, since
+    # then window_end_time == kept_end == audio_duration exactly):
+    # event_start_indices[f] indexes events strictly before frame_times[f],
+    # so slicing only up to window_end_time's own frame would exclude an
+    # event sitting exactly on that boundary. A real window has the same
+    # slack for free, via tf.signal.frame's own pad_end=True framing.
+    end_idx = min(len(frame_times) - 1, _frame_idx(window_end_time) + 1)
     body_tokens = list(
         tokens[event_start_indices[start_idx]:event_start_indices[end_idx]])
 
@@ -248,8 +260,10 @@ class LookbackEndToEndTest(tf.test.TestCase):
 
   def test_note_held_across_a_window_boundary_is_not_truncated_or_duplicated(self):
     # (72, 0, 4.5, 6.5) crosses at least one window boundary under every
-    # lookback/lookahead geometry above (keep_seconds in {4.0, 2.0, 1.0,
-    # 2.4}); explicitly isolate it.
+    # geometry above EXCEPT the baseline (keep_seconds=4.0 puts it entirely
+    # inside the single kept window [4, 8)); explicitly isolate it. The
+    # baseline iteration below is still a valid (if less interesting)
+    # same-window round-trip check for this note.
     ns = _build_reference_ns()
     for name, (window, lookback, lookahead) in _TEST_GEOMETRIES.items():
       geometry = transcription.WindowGeometry(
