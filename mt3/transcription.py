@@ -245,9 +245,11 @@ class Transcriber:
         lookback_frames=lookback_frames,
         lookahead_frames=lookahead_frames)
     if lookback_frames != 0:
-      # _dataset() and the decode path don't yet honor a left-shifted
-      # window; a value that isn't honored must not silently produce wrong
-      # output.
+      # _dataset() builds a correctly left-shifted window, but the decode
+      # side (metrics_utils.decode_and_combine_predictions crops segments
+      # using only each segment's start_time, with no notion of a
+      # per-segment kept-region start) doesn't honor one yet; a value that
+      # isn't honored end to end must not silently produce wrong output.
       raise NotImplementedError(
           'lookback_frames is not yet wired through Transcriber; got '
           f'{lookback_frames}')
