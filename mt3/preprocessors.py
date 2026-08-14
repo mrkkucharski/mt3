@@ -630,11 +630,18 @@ def split_tokens_strided(
 
   With hop_tokens == window_tokens this is equivalent to (and a drop-in
   replacement for) t5.data.preprocessors.split_tokens. With
-  hop_tokens < window_tokens, windows overlap: the trailing
-  (window_tokens - hop_tokens) frames of each window are lookahead context for
-  the encoder. Downstream decoding (metrics_utils.decode_and_combine_predictions)
-  already crops each segment's *output* to end where the next segment's kept
-  region begins, so the overlap here only affects encoder input, never which
+  hop_tokens < window_tokens, windows overlap by (window_tokens - hop_tokens)
+  frames -- extra context for the encoder beyond the hop_tokens-wide region
+  whose decoded output actually gets kept. This function only tiles the
+  *input* windows; it has no opinion on where inside a window the kept
+  region sits. A caller that starts every window at a plain hop-multiple
+  offset gets a trailing overlap (the lookahead case: kept region first,
+  overlap trails); a caller that additionally left-pads its input before
+  framing can shift the kept region to start partway through the window
+  instead (the lookback case: overlap leads, or splits across both ends of
+  the window). Downstream decoding (metrics_utils.decode_and_combine_predictions)
+  crops each segment's *output* to end where the next segment's kept region
+  begins, so the overlap here only affects encoder input, never which
   events get kept.
 
   Window count is ceil(n / hop_tokens) -- this depends only on hop_tokens, not
