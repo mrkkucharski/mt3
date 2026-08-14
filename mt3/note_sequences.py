@@ -35,10 +35,9 @@ MIN_NOTE_DURATION = 0.01
 
 # A note this long, force-closed at end-of-decode, is likely a dropped
 # note-off rather than a real sustained note -- flag it rather than silently
-# emitting an implausible note. Most relevant once lookback (see
-# WindowGeometry) discards the tie section as a safety net: with it gone,
-# a note's offset relies entirely on a later window's note-off event ever
-# being decoded correctly.
+# emitting an implausible note. Lookback boundary reconciliation greatly
+# reduces this failure mode, but a model can still consistently declare the
+# same note active in every later window.
 LONG_HELD_NOTE_WARNING_SECONDS = 30.0
 
 
@@ -375,12 +374,32 @@ class NoteDecodingState:
   # (current_program/current_velocity/current_rhythm) stays correct for the
   # first kept event. Always false for a decode with no min_time.
   suppress: bool = False
+  # While decoding a lookback prefix, note events are applied to this
+  # segment-local shadow rather than to the committed state above.  The
+  # shadow starts with the committed active pitches, is advanced through the
+  # new window's tie section and lookback events, and is reconciled at the
+  # kept-region boundary.  This is necessary because independently decoded
+  # overlapping windows need not agree: simply discarding every pitch event
+  # in the prefix also discards the only evidence that a carried note is no
+  # longer active, allowing it to remain open until the end of the file.
+  prefix_state: Optional['NoteDecodingState'] = None
+  # A shadow tie section may legitimately mention a pitch that the preceding
+  # (authoritative) kept region did not predict.  Such a pitch is ignored
+  # instead of counted invalid; prefix-only notes are never added to the
+  # committed output during reconciliation.
+  is_prefix_shadow: bool = False
   # partially-decoded NoteSequence
   note_sequence: note_seq.NoteSequence = dataclasses.field(
       default_factory=lambda: note_seq.NoteSequence(ticks_per_quarter=220))
   # rhythm flag for each note added to `note_sequence`, in order; the carrier
   # `assign_instruments` needs since notes added here have no rhythm field
   note_rhythms: List[bool] = dataclasses.field(default_factory=list)
+
+  def begin_suppressed_prefix(self, start_time: float) -> None:
+    begin_suppressed_prefix(self, start_time)
+
+  def finish_suppressed_prefix(self, boundary_time: float) -> None:
+    finish_suppressed_prefix(self, boundary_time)
 
 
 def decode_note_onset_event(
@@ -429,6 +448,15 @@ def decode_note_event(
     codec: event_codec.Codec
 ) -> None:
   """Process note event and update decoding state."""
+  if state.suppress and state.prefix_state is not None:
+    # Decode the overlap according to this window's own event stream without
+    # touching the already-committed output.  At min_time, decode_events calls
+    # finish_suppressed_prefix() to use the resulting active set solely as a
+    # boundary reconciliation signal.
+    prefix_state = state.prefix_state
+    prefix_state.suppress = False
+    decode_note_event(prefix_state, time, event, codec)
+    return
   if not state.suppress:
     # A suppressed event's time is by construction earlier than wherever
     # `state` has already advanced to (the previous window's kept region
@@ -455,6 +483,11 @@ def decode_note_event(
     if state.is_tie_section:
       # "tied" pitch
       if key not in state.active_pitches:
+        if state.is_prefix_shadow:
+          # This window believes the pitch was already sounding at its own
+          # start, but the preceding kept region did not.  The preceding
+          # region remains authoritative, so do not synthesize an onset.
+          return
         raise ValueError(
             'inactive pitch/program/rhythm in tie section: %d/%d/%d' %
             (pitch, state.current_program, state.current_rhythm))
@@ -465,6 +498,12 @@ def decode_note_event(
     elif state.current_velocity == 0:
       # note offset
       if key not in state.active_pitches:
+        if state.is_prefix_shadow:
+          # The preceding kept region may already have closed this key, or
+          # the two overlapping predictions may disagree about its identity.
+          # This prefix is reconciliation evidence, not committed output, so
+          # an unmatched shadow offset is harmless.
+          return
         raise ValueError(
             'note-off for inactive pitch/program/rhythm: %d/%d/%d' %
             (pitch, state.current_program, state.current_rhythm))
@@ -535,6 +574,63 @@ def begin_tied_pitches_section(state: NoteDecodingState) -> None:
   """Begin the tied pitches section at the start of a segment."""
   state.tied_pitches = set()
   state.is_tie_section = True
+
+
+def begin_suppressed_prefix(state: NoteDecodingState,
+                            start_time: float) -> None:
+  """Start a segment-local decode of a lookback prefix.
+
+  The active-pitch keys are copied from the committed state so this window's
+  tie section and lookback events can decide which carried notes still exist
+  at the kept boundary.  Modal decoder state is reset to the same defaults as
+  a fresh segment; the segment's own tokens establish program/rhythm/velocity.
+  Completed shadow notes are intentionally thrown away at reconciliation.
+  """
+  state.prefix_state = NoteDecodingState(
+      current_time=start_time,
+      active_pitches=dict(state.active_pitches),
+      is_tie_section=state.is_tie_section,
+      is_prefix_shadow=True)
+
+
+def finish_suppressed_prefix(state: NoteDecodingState,
+                             boundary_time: float) -> None:
+  """Reconcile committed active notes with a decoded lookback prefix.
+
+  The preceding kept region remains authoritative for emitted notes, so keys
+  seen only by the new window are not copied into the committed state.  A
+  committed key that the new window no longer considers active is closed at
+  the boundary.  This bounds disagreement between adjacent model windows to
+  one kept region instead of letting a missed/mismatched note-off smear to the
+  end of the transcription.
+  """
+  prefix_state = state.prefix_state
+  if prefix_state is None:
+    return
+
+  for key, committed_onset in list(state.active_pitches.items()):
+    shadow_onset = prefix_state.active_pitches.get(key)
+    same_note_lifecycle = (
+        shadow_onset is not None and
+        abs(shadow_onset[0] - committed_onset[0]) < 1e-6 and
+        shadow_onset[1] == committed_onset[1])
+    if not same_note_lifecycle:
+      onset_time, onset_velocity = state.active_pitches.pop(key)
+      pitch, program, rhythm = key
+      _add_note_to_sequence(
+          state, start_time=onset_time, end_time=boundary_time,
+          pitch=pitch, velocity=onset_velocity, program=program,
+          rhythm=rhythm)
+
+  # Sticky state for the kept suffix must come from this window's own prefix,
+  # not from the preceding window's decoder stream.
+  state.current_velocity = prefix_state.current_velocity
+  state.current_program = prefix_state.current_program
+  state.current_rhythm = prefix_state.current_rhythm
+  state.current_time = max(state.current_time, boundary_time)
+  state.tied_pitches = set()
+  state.is_tie_section = False
+  state.prefix_state = None
 
 
 def flush_note_decoding_state(

@@ -102,6 +102,105 @@ class LookbackTieSectionTest(tf.test.TestCase):
     # by window B after min_time, wins.
     self.assertEqual(note.end_time, 1.8)
 
+  def test_missing_tie_closes_carried_note_at_kept_boundary(self):
+    state = note_sequences.NoteDecodingState()
+
+    # Window A leaves the note active at its output boundary.
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state, tokens=[_pitch(60)], start_time=0.0, max_time=1.0,
+        codec=CODEC, decode_event_fn=note_sequences.decode_note_event,
+        min_time=0.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    # Window B does not consider the note active at its own start.  There is
+    # no kept non-shift event to trigger reconciliation, so this also verifies
+    # decode_events' end-of-stream reconciliation path.
+    note_sequences.begin_tied_pitches_section(state)
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state, tokens=[_tie(), _shift(130)], start_time=0.5,
+        max_time=None, codec=CODEC,
+        decode_event_fn=note_sequences.decode_note_event, min_time=1.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    ns = note_sequences.flush_note_decoding_state(state)
+    self.assertLen(ns.notes, 1)
+    self.assertEqual(ns.notes[0].start_time, 0.0)
+    self.assertEqual(ns.notes[0].end_time, 1.0)
+
+  def test_program_disagreement_does_not_leave_old_key_open(self):
+    state = note_sequences.NoteDecodingState()
+
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state, tokens=[_program(30), _pitch(63)], start_time=0.0,
+        max_time=1.0, codec=CODEC,
+        decode_event_fn=note_sequences.decode_note_event, min_time=0.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    # The next window hears the same pitch as program 31 rather than 30.
+    # Its prefix-only key must not synthesize a new output note, while the
+    # stale committed program-30 key must be closed at the kept boundary.
+    note_sequences.begin_tied_pitches_section(state)
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state,
+        tokens=[_program(31), _pitch(63), _tie(), _shift(130)],
+        start_time=0.5, max_time=None, codec=CODEC,
+        decode_event_fn=note_sequences.decode_note_event, min_time=1.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    ns = note_sequences.flush_note_decoding_state(state)
+    self.assertLen(ns.notes, 1)
+    self.assertEqual(ns.notes[0].program, 30)
+    self.assertEqual(ns.notes[0].end_time, 1.0)
+
+  def test_note_off_seen_only_in_lookback_closes_carried_note(self):
+    state = note_sequences.NoteDecodingState()
+
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state, tokens=[_pitch(64)], start_time=0.0, max_time=1.0,
+        codec=CODEC, decode_event_fn=note_sequences.decode_note_event,
+        min_time=0.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    note_sequences.begin_tied_pitches_section(state)
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state,
+        tokens=[_pitch(64), _tie(), _shift(30), _velocity(0), _pitch(64)],
+        start_time=0.5, max_time=None, codec=CODEC,
+        decode_event_fn=note_sequences.decode_note_event, min_time=1.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    ns = note_sequences.flush_note_decoding_state(state)
+    self.assertLen(ns.notes, 1)
+    # The previous kept region remains authoritative for timing, so evidence
+    # from the overlap closes the note at the boundary, not retroactively at
+    # the shadow decoder's 0.8-second offset.
+    self.assertEqual(ns.notes[0].end_time, 1.0)
+
+  def test_reonset_in_lookback_does_not_continue_stale_original_onset(self):
+    state = note_sequences.NoteDecodingState()
+
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state, tokens=[_pitch(65)], start_time=0.0, max_time=1.0,
+        codec=CODEC, decode_event_fn=note_sequences.decode_note_event,
+        min_time=0.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    note_sequences.begin_tied_pitches_section(state)
+    invalid, dropped, _ = run_length_encoding.decode_events(
+        state=state,
+        tokens=[
+            _pitch(65), _tie(),
+            _shift(20), _velocity(0), _pitch(65),
+            _shift(30), _velocity(1), _pitch(65),
+        ],
+        start_time=0.5, max_time=None, codec=CODEC,
+        decode_event_fn=note_sequences.decode_note_event, min_time=1.0)
+    self.assertEqual((invalid, dropped), (0, 0))
+
+    ns = note_sequences.flush_note_decoding_state(state)
+    self.assertLen(ns.notes, 1)
+    self.assertEqual(ns.notes[0].end_time, 1.0)
+
   def test_note_entirely_inside_lookback_region_is_not_duplicated(self):
     state = note_sequences.NoteDecodingState()
 
@@ -182,10 +281,9 @@ class LookbackTieSectionTest(tf.test.TestCase):
     self.assertEqual(ns.notes[0].program, 30)
 
   def test_flush_warns_about_an_implausibly_long_held_note(self):
-    # With the tie section discarded under lookback, a note's offset relies
-    # entirely on some later window actually decoding its note-off event.
-    # If none ever does, flush force-closes it at whatever `current_time`
-    # ends up being -- silently, unless this diagnostic fires.
+    # Even with boundary reconciliation, a model can consistently claim that
+    # a note remains active through every later window.  If none ever closes
+    # it, flush force-closes it at `current_time`; keep that visible.
     state = note_sequences.NoteDecodingState()
     invalid, dropped, _ = run_length_encoding.decode_events(
         state=state, tokens=[_pitch(64)], start_time=0.0, max_time=None,
