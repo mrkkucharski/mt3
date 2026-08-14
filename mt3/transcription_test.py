@@ -291,12 +291,16 @@ class QuantizeTest(tf.test.TestCase):
 
 class MinDecodeTimeTest(tf.test.TestCase):
 
-  def test_zero_lookback_reproduces_start_time(self):
+  def test_zero_lookback_returns_none_not_start_time(self):
+    # None (not start_time) is what makes lookback_frames=0 a true no-op:
+    # a non-None min_time changes decode_events' max_time boundary test
+    # from the legacy inclusive `>` to the half-open `>=`, even if it can
+    # never actually suppress anything on its own. See the docstring.
     geometry = transcription.WindowGeometry(window_frames=256)
     codec = _FakeCodec(steps_per_second=100)
     spec = _FakeSpectrogramConfig(frames_per_second=125)
-    self.assertAlmostEqual(
-        transcription._min_decode_time(0.32, geometry, codec, spec), 0.32)
+    self.assertIsNone(
+        transcription._min_decode_time(0.32, geometry, codec, spec))
 
   def test_adds_and_quantizes_lookback_seconds(self):
     # lookback_frames=125 at 125 fps -> 1.0s of lookback.
@@ -317,6 +321,28 @@ class MinDecodeTimeTest(tf.test.TestCase):
     spec = _FakeSpectrogramConfig(frames_per_second=125)
     self.assertAlmostEqual(
         transcription._min_decode_time(-1.0, geometry, codec, spec), 0.0)
+
+
+class ShouldCapLastSegmentTailTest(tf.test.TestCase):
+
+  def test_false_for_the_pure_baseline(self):
+    # The compatibility anchor: 0/0 must not gain new behavior relative to
+    # the pre-overlap baseline.
+    geometry = transcription.WindowGeometry(window_frames=256)
+    self.assertFalse(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_lookahead_only(self):
+    geometry = transcription.WindowGeometry(window_frames=256, lookahead_frames=64)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_lookback_only(self):
+    geometry = transcription.WindowGeometry(window_frames=256, lookback_frames=64)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
+
+  def test_true_for_both(self):
+    geometry = transcription.WindowGeometry(
+        window_frames=256, lookback_frames=32, lookahead_frames=32)
+    self.assertTrue(transcription._should_cap_last_segment_tail(geometry))
 
 
 class CapLastSegmentTailTest(tf.test.TestCase):
