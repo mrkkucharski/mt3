@@ -60,10 +60,12 @@ def _parser() -> argparse.ArgumentParser:
       '--force-program', type=_gm_program, default=None,
       metavar='[0-127]',
       help='Force every decoded note onto this GM program number (0-127), '
-           'ignoring the model\'s own program-change predictions instead of '
-           'trusting them. For single-instrument input where instrument '
-           'identity is already known and program tokens would otherwise '
-           'only be a source of fragmentation/mislabeling.')
+           'ignoring the model\'s own program-change and rhythm/lead-role '
+           'predictions instead of trusting them (both collapse to a single '
+           'instrument group, so the output has exactly one track for that '
+           'program). For single-instrument input where instrument identity '
+           'is already known and program/rhythm tokens would otherwise only '
+           'be a source of fragmentation/mislabeling.')
   return parser
 
 
@@ -121,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f'Wrote {result.output_path}: {result.note_count} predicted notes.')
     print(f'Programs: {list(result.programs)}; drum notes: {result.drum_note_count}.')
     if result.force_program is not None:
-      print(f'Program tokens ignored; every note forced to program '
-            f'{result.force_program}.')
+      print(f'Program and rhythm tokens ignored; every note forced to program '
+            f'{result.force_program} as a single non-rhythm instrument.')
     # From `result`, the geometry Transcriber actually ran with -- not the
     # `geometry` object above, which exists only for pre-flight validation
     # before a checkpoint is loaded. The two happen to agree today (both

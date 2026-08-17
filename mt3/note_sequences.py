@@ -358,13 +358,14 @@ class NoteDecodingState:
   current_program: int = 0
   # rhythm flag to apply to subsequent pitch events
   current_rhythm: bool = False
-  # when set, every decoded note is stamped with this program and incoming
-  # 'program' events are consumed (to keep shift/timing alignment intact)
-  # but otherwise ignored, rather than updating current_program. Used for
-  # single-instrument transcription where the model's own program guesses
+  # when set, every decoded note is stamped with this program and current_rhythm
+  # pinned to False; incoming 'program'/'rhythm' events are consumed (to keep
+  # shift/timing alignment intact) but otherwise ignored, rather than
+  # updating current_program/current_rhythm. Used for single-instrument
+  # transcription where the model's own program (and rhythm/lead) guesses
   # are unreliable/irrelevant; as a side effect it also merges note
   # fragments the model would otherwise have split across differing (wrong)
-  # program guesses, since active notes are keyed by
+  # program or rhythm guesses, since active notes are keyed by
   # (pitch, current_program, current_rhythm).
   force_program: Optional[int] = None
 
@@ -556,8 +557,13 @@ def decode_note_event(
     if state.force_program is None:
       state.current_program = event.value
   elif event.type == 'rhythm':
-    # rhythm flag change
-    state.current_rhythm = bool(event.value)
+    # rhythm flag change -- ignored (beyond having been consumed above) when
+    # force_program pins current_rhythm to False, same as the 'program'
+    # branch above: a single forced instrument has no meaningful rhythm/lead
+    # distinction, and leaving rhythm free to vary would still fragment the
+    # single-instrument output into two (program, rhythm) instrument groups.
+    if state.force_program is None:
+      state.current_rhythm = bool(event.value)
   elif event.type == 'tie':
     if state.suppress:
       # The tie section describes what's sounding at the window's first
