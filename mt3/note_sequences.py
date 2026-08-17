@@ -358,6 +358,19 @@ class NoteDecodingState:
   current_program: int = 0
   # rhythm flag to apply to subsequent pitch events
   current_rhythm: bool = False
+  # when set, every decoded note is stamped with this program and incoming
+  # 'program' events are consumed (to keep shift/timing alignment intact)
+  # but otherwise ignored, rather than updating current_program. Used for
+  # single-instrument transcription where the model's own program guesses
+  # are unreliable/irrelevant; as a side effect it also merges note
+  # fragments the model would otherwise have split across differing (wrong)
+  # program guesses, since active notes are keyed by
+  # (pitch, current_program, current_rhythm).
+  force_program: Optional[int] = None
+
+  def __post_init__(self):
+    if self.force_program is not None:
+      self.current_program = self.force_program
   # onset time and velocity for active pitches, programs and rhythm flags
   active_pitches: MutableMapping[Tuple[int, int, bool],
                                  Tuple[float, int]] = dataclasses.field(
@@ -538,8 +551,10 @@ def decode_note_event(
     velocity = vocabularies.bin_to_velocity(event.value, num_velocity_bins)
     state.current_velocity = velocity
   elif event.type == 'program':
-    # program change
-    state.current_program = event.value
+    # program change -- ignored (beyond having been consumed above) when
+    # force_program pins current_program to a fixed value.
+    if state.force_program is None:
+      state.current_program = event.value
   elif event.type == 'rhythm':
     # rhythm flag change
     state.current_rhythm = bool(event.value)
@@ -590,7 +605,8 @@ def begin_suppressed_prefix(state: NoteDecodingState,
       current_time=start_time,
       active_pitches=dict(state.active_pitches),
       is_tie_section=state.is_tie_section,
-      is_prefix_shadow=True)
+      is_prefix_shadow=True,
+      force_program=state.force_program)
 
 
 def finish_suppressed_prefix(state: NoteDecodingState,

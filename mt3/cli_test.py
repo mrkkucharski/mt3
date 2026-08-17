@@ -58,12 +58,27 @@ class ParserTest(tf.test.TestCase):
     self.assertIsNone(args.lookback_seconds)
     self.assertIsNone(args.lookahead_frames)
     self.assertIsNone(args.lookahead_seconds)
+    self.assertIsNone(args.force_program)
+
+  def test_force_program_out_of_range_is_rejected(self):
+    with self.assertRaises(SystemExit):
+      _parse(['--force-program', '128'])
+    with self.assertRaises(SystemExit):
+      _parse(['--force-program', '-1'])
+
+  def test_force_program_in_range_is_accepted(self):
+    self.assertEqual(_parse(['--force-program', '12']).force_program, 12)
 
 
 class ResolveTranscriberKwargsTest(tf.test.TestCase):
 
   def test_no_flags_yields_empty_kwargs(self):
     self.assertEqual(cli._resolve_transcriber_kwargs(_parse([])), {})
+
+  def test_force_program_passed_through(self):
+    kwargs = cli._resolve_transcriber_kwargs(
+        _parse(['--force-program', '12']))
+    self.assertEqual(kwargs, {'force_program': 12})
 
   def test_lookback_frames_passed_through(self):
     kwargs = cli._resolve_transcriber_kwargs(
