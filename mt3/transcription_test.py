@@ -21,9 +21,11 @@ always reproduce the pre-lookback (lookahead-only) geometry exactly.
 
 import math
 import tempfile
+import types
 
 import numpy as np
 import tensorflow as tf
+from mt3 import note_sequences
 from mt3 import preprocessors
 from mt3 import spectrograms
 from mt3 import transcription
@@ -130,6 +132,41 @@ class TranscriberGeometryValidationTest(tf.test.TestCase):
       transcription.Transcriber(
           '/nonexistent/path/for/mt3/tests',
           input_length=256, lookahead_frames=999999)
+
+  def test_out_of_range_force_program_raises_before_loading_a_checkpoint(self):
+    with tempfile.TemporaryDirectory() as ckpt:
+      with self.assertRaisesRegex(ValueError, 'force_program'):
+        transcription.Transcriber(ckpt, force_program=128)
+      with self.assertRaisesRegex(ValueError, 'force_program'):
+        transcription.Transcriber(ckpt, force_program=-1)
+
+
+class BuildEncodingSpecTest(tf.test.TestCase):
+  """Tests Transcriber._build_encoding_spec against a bare namespace standing
+  in for self, so it can be checked without paying for a real checkpoint
+  restore.
+  """
+
+  def test_none_returns_the_shared_default_spec(self):
+    fake_self = types.SimpleNamespace(force_program=None)
+    spec = transcription.Transcriber._build_encoding_spec(fake_self)
+    self.assertIs(spec, note_sequences.NoteEncodingWithTiesSpec)
+
+  def test_force_program_pins_every_freshly_created_decoding_state(self):
+    fake_self = types.SimpleNamespace(force_program=12)
+    spec = transcription.Transcriber._build_encoding_spec(fake_self)
+    # A fresh decoding state -- including the internal lookback shadow state
+    # NoteDecodingState creates for itself -- must start pinned, not just
+    # happen to read 12 because that's the dataclass default.
+    state = spec.init_decoding_state_fn()
+    self.assertEqual(state.force_program, 12)
+    self.assertEqual(state.current_program, 12)
+    # Only init_decoding_state_fn changes; the rest of the spec (in
+    # particular decode_event_fn, which is what actually reads/ignores
+    # 'program' tokens) is untouched.
+    self.assertIs(spec.decode_event_fn, note_sequences.decode_note_event)
+    self.assertIs(spec.flush_decoding_state_fn,
+                  note_sequences.flush_note_decoding_state)
 
 
 # Small integer analogs of the four requested real-world geometries, using

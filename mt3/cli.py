@@ -6,6 +6,15 @@ import argparse
 import json
 
 
+def _gm_program(value: str) -> int:
+  """argparse type= for a GM program number, with a readable range error."""
+  program = int(value)
+  if not 0 <= program <= 127:
+    raise argparse.ArgumentTypeError(
+        f'{value!r} is not a valid GM program number (must be 0-127)')
+  return program
+
+
 def _parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description='Transcribe a WAV file with multi-instrument MT3.')
   parser.add_argument('--checkpoint', required=True, help='Path to an MT3 checkpoint directory.')
@@ -47,6 +56,14 @@ def _parser() -> argparse.ArgumentParser:
       help='Same as --lookback-frames, in seconds. Converted at the fixed '
            '125 frames/s the spectrogram front end uses; truncated to '
            'whole frames.')
+  parser.add_argument(
+      '--force-program', type=_gm_program, default=None,
+      metavar='[0-127]',
+      help='Force every decoded note onto this GM program number (0-127), '
+           'ignoring the model\'s own program-change predictions instead of '
+           'trusting them. For single-instrument input where instrument '
+           'identity is already known and program tokens would otherwise '
+           'only be a source of fragmentation/mislabeling.')
   return parser
 
 
@@ -71,6 +88,8 @@ def _resolve_transcriber_kwargs(args: argparse.Namespace) -> dict:
     kwargs['lookback_frames'] = args.lookback_frames
   elif args.lookback_seconds is not None:
     kwargs['lookback_frames'] = int(args.lookback_seconds * _FRAMES_PER_SECOND)
+  if args.force_program is not None:
+    kwargs['force_program'] = args.force_program
   return kwargs
 
 
@@ -101,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
   else:
     print(f'Wrote {result.output_path}: {result.note_count} predicted notes.')
     print(f'Programs: {list(result.programs)}; drum notes: {result.drum_note_count}.')
+    if result.force_program is not None:
+      print(f'Program tokens ignored; every note forced to program '
+            f'{result.force_program}.')
     # From `result`, the geometry Transcriber actually ran with -- not the
     # `geometry` object above, which exists only for pre-flight validation
     # before a checkpoint is loaded. The two happen to agree today (both

@@ -421,6 +421,55 @@ class RunLengthEncodingTest(tf.test.TestCase):
     expected_ns.total_time = 0.25
     self.assertProtoEquals(expected_ns, ns)
 
+  def test_decode_note_sequence_events_force_program(self):
+    # A drum hit, then a pitched note whose onset is declared under program
+    # 40 but whose offset is declared under a *different* program (73) --
+    # without force_program this key mismatch would leave the note stuck
+    # open (see the ValueError branch in decode_note_event), demonstrating
+    # exactly the fragmentation force_program exists to prevent.
+    events = [
+        event_codec.Event('velocity', 127),
+        event_codec.Event('drum', 37),
+        event_codec.Event('program', 40),
+        event_codec.Event('rhythm', 0),
+        event_codec.Event('pitch', 60),
+        event_codec.Event('shift', 20),
+        event_codec.Event('velocity', 0),
+        event_codec.Event('program', 73),
+        event_codec.Event('pitch', 60),
+    ]
+    tokens = [codec.encode_event(e) for e in events]
+
+    decoding_state = note_sequences.NoteDecodingState(force_program=12)
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
+        state=decoding_state, tokens=tokens, start_time=0, max_time=None,
+        codec=codec, decode_event_fn=note_sequences.decode_note_event)
+    ns = note_sequences.flush_note_decoding_state(decoding_state)
+
+    # In particular, no invalid event from the program-73 offset failing to
+    # match a program-40 onset -- force_program kept current_program pinned
+    # at 12 throughout, so the onset and offset share the same key.
+    self.assertEqual(0, invalid_ids)
+    self.assertEqual(0, dropped_events)
+    expected_ns = note_seq.NoteSequence(ticks_per_quarter=220)
+    expected_ns.notes.add(
+        pitch=37,
+        velocity=127,
+        start_time=0.0,
+        end_time=0.01,
+        instrument=9,
+        is_drum=True)
+    expected_ns.notes.add(
+        pitch=60,
+        velocity=127,
+        start_time=0.0,
+        end_time=0.20,
+        program=12)
+    expected_ns.instrument_infos.add(instrument=9, name='drums')
+    expected_ns.instrument_infos.add(instrument=0, name='marimba')
+    expected_ns.total_time = 0.20
+    self.assertProtoEquals(expected_ns, ns)
+
   def test_decode_note_sequence_events_invalid_tokens(self):
     events = [5, -1, 161, -2, 25, 162, 9999]
 
