@@ -148,12 +148,22 @@ class BuildEncodingSpecTest(tf.test.TestCase):
   """
 
   def test_none_returns_the_shared_default_spec(self):
-    fake_self = types.SimpleNamespace(force_program=None)
+    fake_self = types.SimpleNamespace(force_program=None, no_rhythm=False)
     spec = transcription.Transcriber._build_encoding_spec(fake_self)
     self.assertIs(spec, note_sequences.NoteEncodingWithTiesSpec)
 
+  def test_no_rhythm_alone_pins_rhythm_but_leaves_program_free(self):
+    fake_self = types.SimpleNamespace(force_program=None, no_rhythm=True)
+    spec = transcription.Transcriber._build_encoding_spec(fake_self)
+    self.assertIsNot(spec, note_sequences.NoteEncodingWithTiesSpec)
+    state = spec.init_decoding_state_fn()
+    self.assertTrue(state.no_rhythm)
+    # Program tokens are still decoded normally -- this is the rhythm-only
+    # half of force_program, not force_program with a default program.
+    self.assertIsNone(state.force_program)
+
   def test_force_program_pins_every_freshly_created_decoding_state(self):
-    fake_self = types.SimpleNamespace(force_program=12)
+    fake_self = types.SimpleNamespace(force_program=12, no_rhythm=True)
     spec = transcription.Transcriber._build_encoding_spec(fake_self)
     # A fresh decoding state -- including the internal lookback shadow state
     # NoteDecodingState creates for itself -- must start pinned, not just
@@ -161,6 +171,7 @@ class BuildEncodingSpecTest(tf.test.TestCase):
     state = spec.init_decoding_state_fn()
     self.assertEqual(state.force_program, 12)
     self.assertEqual(state.current_program, 12)
+    self.assertTrue(state.no_rhythm)
     # Only init_decoding_state_fn changes; the rest of the spec (in
     # particular decode_event_fn, which is what actually reads/ignores
     # 'program' tokens) is untouched.
