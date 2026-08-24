@@ -109,17 +109,32 @@ image = (
         # produced `undefined symbol: ...pywrap_tensorflow_lite_metrics...`
         # on one rebuild where install order changed.
         #
-        # Fix must pin tensorflow-cpu to the *exact* version `tensorflow`
-        # resolved to, captured here rather than hardcoded: an unpinned
-        # `--reinstall tensorflow-cpu` pulls whatever is newest on PyPI
-        # (observed: 2.21.0), which is ahead of `tensorflow` itself
-        # (2.20.0) and not what tensorflow_text/tensorflow-datasets/etc.
-        # were actually resolved compatible with -- that combination broke
-        # tensorflow_text's compiled .so with a *different* undefined-symbol
-        # error (OpDefBuilder::SetShapeFn). Same underlying bug, worse fix.
-        'TF_VERSION=$(uv pip show tensorflow | grep "^Version:" | awk \'{print $2}\') '
+        # An earlier version of this fix captured `TF_VERSION` dynamically
+        # from whatever `tensorflow` resolved to, specifically to avoid
+        # `--reinstall tensorflow-cpu` drifting ahead to whatever's newest
+        # on PyPI. That stopped working once `tensorflow` itself drifted to
+        # 2.21.0 (unpinned in pyproject.toml) -- version-consistent with
+        # `tensorflow-cpu`/`tensorflow-text`, so the file-mixing bug above
+        # didn't recur, but 2.21.0's own `tensorflow-text` wheel is broken
+        # independent of that: `undefined symbol: icudt77_dat` in its
+        # compiled `.so`, confirmed by reinstalling `tensorflow-text` alone
+        # at the matching version (no fix) versus reinstalling both
+        # `tensorflow-cpu` and `tensorflow-text` pinned to 2.20.0 (fixed).
+        # So this now hardcodes a known-good version rather than matching
+        # whatever `tensorflow` resolved to -- a deliberate downgrade, not
+        # driven by pyproject.toml's own (still unpinned) `tensorflow` dep.
+        # `tensorflow-text` must be reinstalled too, not just `tensorflow-cpu`,
+        # or it stays linked against the original (broken) 2.21.0 install.
+        # `--no-deps` on the tensorflow-cpu reinstall drops `tensorboard`
+        # too -- 2.20.0 depends on it (2.21.0 didn't), and `t5x.checkpoints`
+        # imports it directly, so it needs an explicit (dep-resolving)
+        # install of its own or t5x fails at import with an unrelated-looking
+        # `ModuleNotFoundError: No module named 'tensorboard'`.
+        'TF_VERSION=2.20.0 '
         '&& uv pip uninstall --system tensorflow '
-        '&& uv pip install --system --reinstall --no-deps "tensorflow-cpu==$TF_VERSION"',
+        '&& uv pip install --system --reinstall --no-deps "tensorflow-cpu==$TF_VERSION" '
+        '&& uv pip install --system --reinstall --no-deps "tensorflow-text==$TF_VERSION" '
+        '&& uv pip install --system "tensorboard==$TF_VERSION"',
         "uv pip install --system --upgrade 'jax[cuda12]==0.10.2'",
     )
 )
