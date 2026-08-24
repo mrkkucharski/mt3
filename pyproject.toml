@@ -60,10 +60,10 @@ override-dependencies = [
   "seqio-nightly; sys_platform != 'darwin'",
   "tensorflow-cpu; sys_platform != 'darwin'",
   "tfds-nightly; sys_platform != 'darwin'",
+  "flax @ git+https://github.com/google/flax@c31deb2b8ec8d0cc1b2092aa81890823d21a4739",
 ]
 
 [tool.uv.sources]
-flax = { git = "https://github.com/google/flax" }
 note-seq = { git = "https://github.com/magenta/note-seq" }
 seqio = { git = "https://github.com/google/seqio" }
 t5x = { git = "https://github.com/google-research/t5x" }
