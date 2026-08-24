@@ -66,6 +66,14 @@ def _parser() -> argparse.ArgumentParser:
            'program). For single-instrument input where instrument identity '
            'is already known and program/rhythm tokens would otherwise only '
            'be a source of fragmentation/mislabeling.')
+  parser.add_argument(
+      '--no-rhythm', action='store_true',
+      help='Ignore the model\'s own rhythm/lead-role predictions, decoding '
+           'every note as non-rhythm, so each GM program ends up as a single '
+           'track instead of being split into a lead and a :rhythm one. The '
+           'rhythm-only half of --force-program (which implies this), for '
+           'input where instrument identity is still worth decoding but the '
+           'rhythm/lead split would only be a source of fragmentation.')
   return parser
 
 
@@ -92,6 +100,8 @@ def _resolve_transcriber_kwargs(args: argparse.Namespace) -> dict:
     kwargs['lookback_frames'] = int(args.lookback_seconds * _FRAMES_PER_SECOND)
   if args.force_program is not None:
     kwargs['force_program'] = args.force_program
+  if args.no_rhythm:
+    kwargs['no_rhythm'] = True
   return kwargs
 
 
@@ -125,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.force_program is not None:
       print(f'Program and rhythm tokens ignored; every note forced to program '
             f'{result.force_program} as a single non-rhythm instrument.')
+    elif result.no_rhythm:
+      print('Rhythm tokens ignored; every note decoded as non-rhythm, one '
+            'instrument per program.')
     # From `result`, the geometry Transcriber actually ran with -- not the
     # `geometry` object above, which exists only for pre-flight validation
     # before a checkpoint is loaded. The two happen to agree today (both

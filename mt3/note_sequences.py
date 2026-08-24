@@ -358,20 +358,29 @@ class NoteDecodingState:
   current_program: int = 0
   # rhythm flag to apply to subsequent pitch events
   current_rhythm: bool = False
-  # when set, every decoded note is stamped with this program and current_rhythm
-  # pinned to False; incoming 'program'/'rhythm' events are consumed (to keep
-  # shift/timing alignment intact) but otherwise ignored, rather than
-  # updating current_program/current_rhythm. Used for single-instrument
-  # transcription where the model's own program (and rhythm/lead) guesses
+  # when set, every decoded note is stamped with this program; incoming
+  # 'program' events are consumed (to keep shift/timing alignment intact)
+  # but otherwise ignored, rather than updating current_program. Used for
+  # single-instrument transcription where the model's own program guesses
   # are unreliable/irrelevant; as a side effect it also merges note
   # fragments the model would otherwise have split across differing (wrong)
-  # program or rhythm guesses, since active notes are keyed by
-  # (pitch, current_program, current_rhythm).
+  # program guesses, since active notes are keyed by
+  # (pitch, current_program, current_rhythm). Implies no_rhythm: a single
+  # forced instrument has no meaningful rhythm/lead distinction, and leaving
+  # rhythm free to vary would still fragment the output into two
+  # (program, rhythm) instrument groups.
   force_program: Optional[int] = None
+  # the same idea for the rhythm/lead role alone: current_rhythm is pinned to
+  # False and 'rhythm' events are consumed but ignored, so all notes collapse
+  # into the non-rhythm group of whatever program they were decoded under.
+  # Used when instrument identity is still worth decoding but the rhythm/lead
+  # split is not.
+  no_rhythm: bool = False
 
   def __post_init__(self):
     if self.force_program is not None:
       self.current_program = self.force_program
+      self.no_rhythm = True
   # onset time and velocity for active pitches, programs and rhythm flags
   active_pitches: MutableMapping[Tuple[int, int, bool],
                                  Tuple[float, int]] = dataclasses.field(
@@ -558,11 +567,10 @@ def decode_note_event(
       state.current_program = event.value
   elif event.type == 'rhythm':
     # rhythm flag change -- ignored (beyond having been consumed above) when
-    # force_program pins current_rhythm to False, same as the 'program'
-    # branch above: a single forced instrument has no meaningful rhythm/lead
-    # distinction, and leaving rhythm free to vary would still fragment the
-    # single-instrument output into two (program, rhythm) instrument groups.
-    if state.force_program is None:
+    # no_rhythm pins current_rhythm to False, same as the 'program' branch
+    # above. force_program implies no_rhythm, so a forced single instrument
+    # collapses to one (program, rhythm) group rather than two.
+    if not state.no_rhythm:
       state.current_rhythm = bool(event.value)
   elif event.type == 'tie':
     if state.suppress:
@@ -612,7 +620,8 @@ def begin_suppressed_prefix(state: NoteDecodingState,
       active_pitches=dict(state.active_pitches),
       is_tie_section=state.is_tie_section,
       is_prefix_shadow=True,
-      force_program=state.force_program)
+      force_program=state.force_program,
+      no_rhythm=state.no_rhythm)
 
 
 def finish_suppressed_prefix(state: NoteDecodingState,

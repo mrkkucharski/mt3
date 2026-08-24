@@ -503,6 +503,39 @@ class RunLengthEncodingTest(tf.test.TestCase):
     self.assertEqual(1, len(ns.instrument_infos))
     self.assertEqual('marimba', ns.instrument_infos[0].name)
 
+  def test_decode_note_sequence_events_no_rhythm_keeps_programs(self):
+    # Same two differing-rhythm onsets as the force_program test above, but
+    # under differing programs and with no_rhythm alone: the rhythm/lead
+    # split collapses while the decoded programs stay distinct.
+    events = [
+        event_codec.Event('velocity', 127),
+        event_codec.Event('program', 40),
+        event_codec.Event('rhythm', 1),
+        event_codec.Event('pitch', 60),
+        event_codec.Event('shift', 10),
+        event_codec.Event('velocity', 127),
+        event_codec.Event('program', 24),
+        event_codec.Event('rhythm', 0),
+        event_codec.Event('pitch', 64),
+    ]
+    tokens = [codec.encode_event(e) for e in events]
+
+    decoding_state = note_sequences.NoteDecodingState(no_rhythm=True)
+    invalid_ids, dropped_events, _ = run_length_encoding.decode_events(
+        state=decoding_state, tokens=tokens, start_time=0, max_time=None,
+        codec=codec, decode_event_fn=note_sequences.decode_note_event)
+    ns = note_sequences.flush_note_decoding_state(decoding_state)
+
+    self.assertEqual(0, invalid_ids)
+    self.assertEqual(0, dropped_events)
+    self.assertEqual([40, 24], [note.program for note in ns.notes])
+    # Two instrument groups because the programs differ, not because of the
+    # rhythm flags -- neither carries a `:rhythm` name.
+    self.assertEqual([0, 1], [note.instrument for note in ns.notes])
+    self.assertEqual(
+        ['violin', 'acoustic-guitar-nylon'],
+        [info.name for info in ns.instrument_infos])
+
   def test_decode_note_sequence_events_invalid_tokens(self):
     events = [5, -1, 161, -2, 25, 162, 9999]
 

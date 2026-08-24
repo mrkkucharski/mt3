@@ -132,6 +132,10 @@ class TranscriptionResult:
   # GM program every note was forced onto, or None if program tokens were
   # decoded normally (see Transcriber's force_program).
   force_program: int | None = None
+  # whether rhythm tokens were ignored, collapsing the rhythm/lead split
+  # (see Transcriber's no_rhythm). Always true when force_program is set,
+  # which implies it.
+  no_rhythm: bool = False
 
   def as_dict(self) -> dict[str, object]:
     return {
@@ -149,6 +153,7 @@ class TranscriptionResult:
         'lookahead_seconds': self.lookahead_seconds,
         'cost_multiplier': self.cost_multiplier,
         'force_program': self.force_program,
+        'no_rhythm': self.no_rhythm,
     }
 
 
@@ -346,7 +351,8 @@ class Transcriber:
                target_length: int = TARGET_LENGTH,
                lookahead_frames: int = 0,
                lookback_frames: int = 0,
-               force_program: int | None = None):
+               force_program: int | None = None,
+               no_rhythm: bool = False):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
@@ -360,6 +366,10 @@ class Transcriber:
           f'force_program must be in [{note_seq.MIN_MIDI_PROGRAM}, '
           f'{note_seq.MAX_MIDI_PROGRAM}]; got {force_program}')
     self.force_program = force_program
+    # force_program implies it (NoteDecodingState.__post_init__ does the same
+    # for the decoding state), so the recorded/reported value matches what
+    # decoding actually did rather than what was passed in.
+    self.no_rhythm = no_rhythm or force_program is not None
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
     self.lookahead_frames = lookahead_frames
@@ -379,22 +389,23 @@ class Transcriber:
     self._restore()
 
   def _build_encoding_spec(self) -> note_sequences.NoteEncodingSpecType:
-    """The decoding spec to use, pinning every note to force_program if set.
+    """The decoding spec to use, honouring force_program/no_rhythm if set.
 
     NoteEncodingWithTiesSpec's init_decoding_state_fn is ordinarily just the
-    NoteDecodingState class; when force_program is set, it's replaced with a
-    partial that pins force_program on every fresh decoding state (including
+    NoteDecodingState class; when either pin is requested, it's replaced with
+    a partial that applies the pin to every fresh decoding state (including
     the per-window lookback shadow state NoteDecodingState creates
-    internally), so every decoded note lands under the one program
-    regardless of what program tokens the model emits.
+    internally), so every decoded note lands under the one program and/or
+    the non-rhythm role regardless of what tokens the model emits.
     """
-    if self.force_program is None:
+    if self.force_program is None and not self.no_rhythm:
       return note_sequences.NoteEncodingWithTiesSpec
     return replace(
         note_sequences.NoteEncodingWithTiesSpec,
         init_decoding_state_fn=functools.partial(
             note_sequences.NoteDecodingState,
-            force_program=self.force_program))
+            force_program=self.force_program,
+            no_rhythm=self.no_rhythm))
 
   def _parse_model_gin(self) -> None:
     model_gin = Path(__file__).resolve().parent / 'gin/model.gin'
@@ -543,4 +554,5 @@ class Transcriber:
         lookahead_seconds=self.geometry.seconds(
             self.geometry.lookahead_frames, self.spectrogram_config),
         cost_multiplier=window_frames / self.hop_frames,
-        force_program=self.force_program)
+        force_program=self.force_program,
+        no_rhythm=self.no_rhythm)
