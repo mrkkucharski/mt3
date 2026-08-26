@@ -10,6 +10,7 @@ supported-markers = [
 
 [manifest]
 overrides = [
+    { name = "flax", git = "https://github.com/google/flax?rev=c31deb2b8ec8d0cc1b2092aa81890823d21a4739" },
     { name = "seqio-nightly", marker = "sys_platform != 'darwin'" },
     { name = "tensorflow-cpu", marker = "sys_platform != 'darwin'" },
     { name = "tfds-nightly", marker = "sys_platform != 'darwin'" },
@@ -373,7 +374,7 @@ wheels = [
 [[package]]
 name = "flax"
 version = "0.12.8"
-source = { git = "https://github.com/google/flax#c31deb2b8ec8d0cc1b2092aa81890823d21a4739" }
+source = { git = "https://github.com/google/flax?rev=c31deb2b8ec8d0cc1b2092aa81890823d21a4739#c31deb2b8ec8d0cc1b2092aa81890823d21a4739" }
 dependencies = [
     { name = "jax", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "msgpack", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
@@ -970,7 +971,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "absl-py" },
-    { name = "flax", git = "https://github.com/google/flax" },
+    { name = "flax", git = "https://github.com/google/flax?rev=c31deb2b8ec8d0cc1b2092aa81890823d21a4739" },
     { name = "gin-config" },
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "immutabledict" },
@@ -978,16 +979,16 @@ requires-dist = [
     { name = "mido", specifier = ">=1.3,<2" },
     { name = "mir-eval" },
     { name = "nltk", specifier = "==3.9.1" },
-    { name = "note-seq", git = "https://github.com/magenta/note-seq" },
+    { name = "note-seq", git = "https://github.com/magenta/note-seq?rev=35825508885343fb06f93dc87ff491dbbf034505" },
     { name = "numpy" },
     { name = "pretty-midi" },
     { name = "protobuf", specifier = ">=6.31,<6.33" },
     { name = "pyfluidsynth", specifier = ">=1.4.0" },
     { name = "scikit-learn" },
     { name = "scipy" },
-    { name = "seqio", git = "https://github.com/google/seqio" },
+    { name = "seqio", git = "https://github.com/google/seqio?rev=aaa0e111c5e9d8fb49bfa992f2272a121a95f741" },
     { name = "t5" },
-    { name = "t5x", git = "https://github.com/google-research/t5x" },
+    { name = "t5x", git = "https://github.com/google-research/t5x?rev=2045b332cf19887885a74ef1bd6b2adb2a7ca634" },
     { name = "tensorflow" },
     { name = "tensorflow-datasets" },
 ]
@@ -1031,7 +1032,7 @@ wheels = [
 [[package]]
 name = "note-seq"
 version = "0.0.5"
-source = { git = "https://github.com/magenta/note-seq#35825508885343fb06f93dc87ff491dbbf034505" }
+source = { git = "https://github.com/magenta/note-seq?rev=35825508885343fb06f93dc87ff491dbbf034505#35825508885343fb06f93dc87ff491dbbf034505" }
 dependencies = [
     { name = "absl-py", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "attrs", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
@@ -1659,7 +1660,7 @@ wheels = [
 [[package]]
 name = "t5x"
 version = "0.0.0"
-source = { git = "https://github.com/google-research/t5x#d6a8c90be27aff8e59f31ca08f5187972f77616d" }
+source = { git = "https://github.com/google-research/t5x?rev=2045b332cf19887885a74ef1bd6b2adb2a7ca634#2045b332cf19887885a74ef1bd6b2adb2a7ca634" }
 dependencies = [
     { name = "absl-py", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "airio", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
