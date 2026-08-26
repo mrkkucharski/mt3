@@ -1,0 +1,16 @@
+# Dependency overrides for the Modal image build, passed explicitly as
+# `uv pip install --override modal-overrides.txt`.
+#
+# pyproject.toml's [tool.uv] override-dependencies carries the same flax pin,
+# but the image build demonstrably does not honor it: builds on 2026-08-26
+# fetched https://github.com/google/flax at HEAD (01854da, 0.12.9, which
+# requires Python>=3.12) and failed on the image's Python 3.11, despite the
+# pin being present and unchanged. `uv pip install` is the pip-compatible
+# interface and does not read the project's [tool.uv] table the way
+# `uv sync`/`uv lock` do -- so the pin has to be handed to it directly.
+#
+# t5x declares its own UNPINNED flax URL, which is what pulls HEAD in; an
+# override is the only thing that outranks a transitive URL requirement.
+#
+# Keep this in sync with pyproject.toml's [tool.uv.sources] flax rev.
+flax @ git+https://github.com/google/flax@c31deb2b8ec8d0cc1b2092aa81890823d21a4739

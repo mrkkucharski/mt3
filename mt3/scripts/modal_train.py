@@ -85,9 +85,13 @@ image = (
     modal.Image.from_registry(f'nvidia/cuda:{CUDA_TAG}', add_python='3.11')
     .entrypoint([])
     .apt_install('git', 'libsndfile1', 'libfluidsynth3', 'fluid-soundfont-gm', 'ffmpeg')
-    # Pinned to match pyproject.toml's own [tool.uv].required-version --
-    # a bare `pip install uv` pulled 0.12.1, which that pin rejects outright.
-    .pip_install('uv>=0.9.20,<0.10')
+    # Pinned EXACTLY, not to a range. pyproject.toml's own
+    # [tool.uv].required-version is what rules out a bare `pip install uv`
+    # (which pulled 0.12.1), but a floating `>=0.9.20,<0.10` still lets the
+    # builder pick up a different 0.9.x on any rebuild -- and resolver
+    # behaviour is exactly what has been varying between otherwise identical
+    # builds here. This is the version the working lockfile was resolved with.
+    .pip_install('uv==0.9.20')
     .add_local_dir(
         FORK_ROOT,
         remote_path='/workspace/mt3',
@@ -95,12 +99,19 @@ image = (
         ignore=['.venv', '.git', 'build', 'dist', '*.egg-info', '__pycache__'],
     )
     .run_commands(
-        # `tool.uv.sources` (the git pins for flax/note-seq/seqio/t5x) and
-        # `tool.uv.override-dependencies` (the non-darwin tensorflow-cpu /
-        # seqio-nightly / tfds-nightly swap) are only honored when uv treats
-        # this as installing the project itself -- i.e. `uv pip install .`
-        # run from inside /workspace/mt3, not a path reference from outside.
-        'cd /workspace/mt3 && uv pip install --system .',
+        # Run from inside /workspace/mt3, not as a path reference from
+        # outside, so uv treats this as installing the project itself.
+        #
+        # --override is NOT redundant with pyproject.toml's
+        # [tool.uv].override-dependencies. Observed on 2026-08-26: this build
+        # fetched every git source at HEAD, flax included -- 01854da (0.12.9,
+        # Python>=3.12) rather than the pinned c31deb2b -- and died on the
+        # image's Python 3.11 while that pin sat unchanged in pyproject.toml.
+        # `uv pip install` is the pip-compatible interface and does not apply
+        # the project's [tool.uv] table the way `uv sync`/`uv lock` do, so the
+        # pin only binds when handed to it directly. See modal-overrides.txt.
+        'cd /workspace/mt3 && uv pip install --system '
+        '--override modal-overrides.txt .',
         # `tensorflow` and the override's `tensorflow-cpu` both write into
         # the same `tensorflow/` import namespace -- uv installs both
         # (override-dependencies adds a constraint, it does not substitute
