@@ -66,6 +66,17 @@ def _program_aware_note_scores(
   rhythm_map_fn = (granularity.rhythm_map_fn if include_rhythm
                    else lambda rhythm: False)
 
+  # Project both sequences into the collapsed key space before scoring: a
+  # reference whose lead and rhythm parts sound the same pitch of the same
+  # program at once cannot be transcribed note-for-note by a model with no
+  # rhythm flag (the training targets are trimmed the same way -- see
+  # note_sequence_to_onsets_and_offsets_and_programs), so leaving those notes
+  # in place would score an unreachable ideal. The estimate is already in that
+  # space; trimming it too keeps the two sides symmetric.
+  if not include_rhythm:
+    ref_ns = note_sequences.trim_overlapping_notes(ref_ns)
+    est_ns = note_sequences.trim_overlapping_notes(est_ns)
+
   ref_ns = copy.deepcopy(ref_ns)
   ref_rhythms = note_sequences.instrument_rhythms(ref_ns)
   for note in ref_ns.notes:

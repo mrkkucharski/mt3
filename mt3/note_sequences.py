@@ -265,7 +265,8 @@ def note_sequence_to_onsets_and_offsets_and_programs(
         `ns.instrument_infos`. False reports every note as non-rhythm, which
         also drops the flag from the sort key below -- so a rhythm-labelled
         NoteSequence yields byte-identical events to an unlabelled one, rather
-        than merely equivalent ones ordered differently. Pass
+        than merely equivalent ones ordered differently -- and trims notes
+        that the collapse has just made indistinguishable (see below). Pass
         `codec.has_event_type('rhythm')`.
 
   Returns:
@@ -273,6 +274,19 @@ def note_sequence_to_onsets_and_offsets_and_programs(
     values: A list of NoteEventData objects where velocity is zero for note
         offsets.
   """
+  if not include_rhythm:
+    # Collapsing rhythm merges two instrument groups the corpus kept apart, so
+    # notes that were legal under the rhythm-aware encoding can now collide on
+    # one decoder key: a lead and a rhythm guitar sounding the same pitch of
+    # the same program at the same time become two onsets and two offsets for
+    # (pitch, program). The encoding cannot represent that -- decoding drops
+    # the second note-off as an invalid event and emits a spurious
+    # MIN_NOTE_DURATION note -- so project the sequence into what the collapsed
+    # key space can express, exactly as tokenize_guitarset_example already does
+    # for corpora that overlap notes within a single instrument. Notes that do
+    # NOT collide are untouched, so this is a no-op for a corpus whose parts
+    # never play in unison.
+    ns = trim_overlapping_notes(ns)
   rhythm_by_instrument = instrument_rhythms(ns) if include_rhythm else {}
   def rhythm(note) -> bool:
     return rhythm_by_instrument.get(note.instrument, False)

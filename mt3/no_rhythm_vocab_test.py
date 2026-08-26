@@ -176,6 +176,49 @@ class NoRhythmEncodingTest(tf.test.TestCase):
     self.assertFalse(any(rhythms.values()))
     self.assertLen(decoded.instrument_infos, 2)
 
+  def test_unison_across_the_two_roles_stays_representable(self):
+    """A lead and a rhythm guitar can play the same note at the same time.
+
+    Under the rhythm-aware codec those are two different decoder keys; the
+    collapse merges them, and without trimming the pair encodes as two onsets
+    and two offsets for one key -- which decodes to one invalid event plus a
+    spurious MIN_NOTE_DURATION note.
+    """
+    unison = [(60, 30, 0.0, 0.5), (60, 30, 0.0, 0.5)]
+    ns = _build_ns(unison, [False, True])
+
+    tokens = _encode(ns, NO_RHYTHM_CODEC)
+    decoded = _decode(tokens, NO_RHYTHM_CODEC)  # asserts 0 invalid, 0 dropped
+    self.assertLen(decoded.notes, 1)
+    note = decoded.notes[0]
+    self.assertEqual((60, 30), (note.pitch, note.program))
+    self.assertAlmostEqual(0.0, note.start_time, places=2)
+    self.assertAlmostEqual(0.5, note.end_time, places=2)
+
+    # The rhythm-aware codec keeps both notes, untrimmed, as before.
+    rhythm_decoded = _decode(_encode(ns, RHYTHM_CODEC), RHYTHM_CODEC)
+    self.assertLen(rhythm_decoded.notes, 2)
+
+  def test_partial_overlap_across_roles_is_split_not_dropped(self):
+    # The notes are distinguishable for part of their span, so the collapse
+    # shortens the first rather than discarding it.
+    ns = _build_ns([(60, 30, 0.0, 0.5), (60, 30, 0.2, 0.6)], [False, True])
+    decoded = _decode(_encode(ns, NO_RHYTHM_CODEC), NO_RHYTHM_CODEC)
+
+    spans = sorted((round(note.start_time, 2), round(note.end_time, 2))
+                   for note in decoded.notes)
+    self.assertEqual([(0.0, 0.2), (0.2, 0.6)], spans)
+
+  def test_notes_that_do_not_collide_are_untouched(self):
+    # Same pitch and time in both roles but different programs: still two
+    # distinct keys once rhythm is gone, so nothing is trimmed.
+    ns = _build_ns([(60, 30, 0.0, 0.5), (60, 24, 0.0, 0.5)], [False, True])
+    decoded = _decode(_encode(ns, NO_RHYTHM_CODEC), NO_RHYTHM_CODEC)
+
+    self.assertLen(decoded.notes, 2)
+    for note in decoded.notes:
+      self.assertAlmostEqual(0.5, note.end_time, places=2)
+
   def test_tie_section_omits_rhythm_events(self):
     # The tie section is encoded from the encoding state rather than from note
     # data, so it needs its own guarantee (a stray Event('rhythm', 0) here
@@ -228,6 +271,23 @@ class NoRhythmMetricsTest(tf.test.TestCase):
         metrics._program_aware_note_scores(
             ref_ns, est_ns, granularity_type='full')[self.F1],
         1.0)
+
+  def test_unison_across_roles_is_still_a_reachable_reference(self):
+    """The collapsed reference must be something a rhythm-free model can hit.
+
+    Both roles sound the same note at once, so the training targets encode it
+    once (see test_unison_across_the_two_roles_stays_representable); scoring
+    against the raw two-note
+    reference would make a perfect transcription unattainable.
+    """
+    ref_ns = _build_ns([(60, 30, 0.0, 0.5), (60, 30, 0.0, 0.5)], [False, True])
+    est_ns = _build_ns([(60, 30, 0.0, 0.5)], [False])
+
+    self.assertAlmostEqual(
+        1.0,
+        metrics._program_aware_note_scores(
+            ref_ns, est_ns, granularity_type='full',
+            include_rhythm=False)[self.F1])
 
 
 if __name__ == '__main__':

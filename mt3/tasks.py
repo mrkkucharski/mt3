@@ -328,7 +328,7 @@ add_transcription_task_to_registry(
 # from the vocabulary: rhythm is encoded nowhere in the targets, so the model
 # never learns it and eval never scores it. Registered under its own
 # 'guitar_pilot_notes_ties_vb1nr_*' names; select it from gin (see
-# gin/guitar_pilot_norhythm.gin), which must also set
+# gin/no_rhythm.gin), which must also set
 # VocabularyConfig.include_rhythm=False so the model's own codec matches.
 add_transcription_task_to_registry(
     dataset_config=datasets.GUITAR_PILOT_CONFIG,
