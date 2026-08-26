@@ -64,6 +64,16 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
-note-seq = { git = "https://github.com/magenta/note-seq" }
-seqio = { git = "https://github.com/google/seqio" }
-t5x = { git = "https://github.com/google-research/t5x" }
+# Every git source is pinned to the commit uv.lock already resolved, so an
+# image rebuild can never re-resolve to a moving HEAD. Two outages in one week
+# came from exactly that (the flax override below, and the TF stack pin), and
+# on 2026-08-26 a rebuild from a byte-identical pyproject.toml failed where the
+# previous one had succeeded: t5x declares its own UNPINNED flax URL, and which
+# of the two flax URLs wins the resolution is evidently not deterministic. The
+# override alone therefore isn't enough -- flax is pinned here as well, so the
+# project's own direct dependency names one exact commit no matter what t5x asks
+# for. Bump these deliberately, never by leaving them to drift.
+note-seq = { git = "https://github.com/magenta/note-seq", rev = "35825508885343fb06f93dc87ff491dbbf034505" }
+seqio = { git = "https://github.com/google/seqio", rev = "aaa0e111c5e9d8fb49bfa992f2272a121a95f741" }
+t5x = { git = "https://github.com/google-research/t5x", rev = "2045b332cf19887885a74ef1bd6b2adb2a7ca634" }
+flax = { git = "https://github.com/google/flax", rev = "c31deb2b8ec8d0cc1b2092aa81890823d21a4739" }
