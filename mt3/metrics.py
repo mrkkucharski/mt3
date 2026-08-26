@@ -36,7 +36,8 @@ import seqio
 def _program_aware_note_scores(
     ref_ns: note_seq.NoteSequence,
     est_ns: note_seq.NoteSequence,
-    granularity_type: str
+    granularity_type: str,
+    include_rhythm: bool = True
 ) -> Mapping[str, float]:
   """Compute precision/recall/F1 for notes taking program into account.
 
@@ -51,13 +52,19 @@ def _program_aware_note_scores(
     ref_ns: Reference NoteSequence with ground truth labels.
     est_ns: Estimated NoteSequence.
     granularity_type: String key in vocabularies.PROGRAM_GRANULARITIES dict.
+    include_rhythm: whether the model was trained with the rhythm/lead flag in
+        its vocabulary. False collapses the split for both sequences: the
+        reference comes straight from the corpus NoteSequence, which keeps its
+        `:rhythm` instrument names either way, so without this it would be
+        split into tracks a rhythm-free model could never match.
 
   Returns:
     A dictionary containing precision, recall, and F1 score.
   """
   granularity = vocabularies.PROGRAM_GRANULARITIES[granularity_type]
   program_map_fn = granularity.program_map_fn
-  rhythm_map_fn = granularity.rhythm_map_fn
+  rhythm_map_fn = (granularity.rhythm_map_fn if include_rhythm
+                   else lambda rhythm: False)
 
   ref_ns = copy.deepcopy(ref_ns)
   ref_rhythms = note_sequences.instrument_rhythms(ref_ns)
@@ -210,6 +217,9 @@ def transcription_metrics(
   else:
     encoding_spec = note_sequences.NoteEncodingWithTiesSpec
 
+  # The codec is the authority on whether this run models rhythm at all.
+  include_rhythm = codec.has_event_type('rhythm')
+
   # The first target for each full example contains the NoteSequence; just
   # organize by ID.
   full_targets = {}
@@ -261,10 +271,14 @@ def transcription_metrics(
     if track_specs is not None:
       # Compute transcription metrics separately for each track.
       for spec in track_specs:
+        # A rhythm-filtered spec can only be honoured by a run that models
+        # rhythm; otherwise match every note of the program, as an unset
+        # spec.rhythm does.
+        spec_rhythm = spec.rhythm if include_rhythm else None
         est_tracks.append(note_sequences.extract_track(
-            prediction['est_ns'], spec.program, spec.is_drum, spec.rhythm))
+            prediction['est_ns'], spec.program, spec.is_drum, spec_rhythm))
         ref_tracks.append(note_sequences.extract_track(
-            target['ref_ns'], spec.program, spec.is_drum, spec.rhythm))
+            target['ref_ns'], spec.program, spec.is_drum, spec_rhythm))
         use_track_offsets.append(not onsets_only and not spec.is_drum)
         use_track_velocities.append(not onsets_only)
         track_instrument_names.append(spec.name)
@@ -361,7 +375,8 @@ def transcription_metrics(
     for granularity_type in vocabularies.PROGRAM_GRANULARITIES:
       for name, score in _program_aware_note_scores(
           target['ref_ns'], prediction['est_ns'],
-          granularity_type=granularity_type).items():
+          granularity_type=granularity_type,
+          include_rhythm=include_rhythm).items():
         scores[name].append(score)
 
     # Add (non-program-aware) note metrics across a range of onset/offset

@@ -41,6 +41,14 @@ class VocabularyConfig:
   steps_per_second: int = DEFAULT_STEPS_PER_SECOND
   max_shift_seconds: int = DEFAULT_MAX_SHIFT_SECONDS
   num_velocity_bins: int = DEFAULT_NUM_VELOCITY_BINS
+  # Whether the codec carries the guitar rhythm/lead flag at all. False builds
+  # a codec with no `rhythm` event range: the corpus keeps its `:rhythm`
+  # labels but nothing encodes, decodes, or scores them, so the model never
+  # learns the distinction. Because `rhythm` is the LAST event range, dropping
+  # it leaves every other event's ids unchanged, and `num_embeddings` rounds
+  # the vocabulary up to the same multiple of 128 either way -- so checkpoints
+  # remain mutually restorable across the two settings.
+  include_rhythm: bool = True
 
   @property
   def abbrev_str(self):
@@ -51,6 +59,8 @@ class VocabularyConfig:
       s += 'ms%d' % self.max_shift_seconds
     if self.num_velocity_bins != DEFAULT_NUM_VELOCITY_BINS:
       s += 'vb%d' % self.num_velocity_bins
+    if not self.include_rhythm:
+      s += 'nr'
     return s
 
 
@@ -78,13 +88,16 @@ def drop_programs(tokens, codec: event_codec.Codec):
   """Drops program and rhythm change events from a token sequence.
 
   `rhythm` is meaningless without the `program` state it qualifies, so the
-  'flat' granularity (a single merged, program-agnostic track) drops both.
+  'flat' granularity (a single merged, program-agnostic track) drops both --
+  when the codec has a `rhythm` range at all (see
+  `VocabularyConfig.include_rhythm`).
   """
   min_program_id, max_program_id = codec.event_type_range('program')
-  min_rhythm_id, max_rhythm_id = codec.event_type_range('rhythm')
-  is_program = (tokens >= min_program_id) & (tokens <= max_program_id)
-  is_rhythm = (tokens >= min_rhythm_id) & (tokens <= max_rhythm_id)
-  return tokens[~(is_program | is_rhythm)]
+  drop = (tokens >= min_program_id) & (tokens <= max_program_id)
+  if codec.has_event_type('rhythm'):
+    min_rhythm_id, max_rhythm_id = codec.event_type_range('rhythm')
+    drop = drop | ((tokens >= min_rhythm_id) & (tokens <= max_rhythm_id))
+  return tokens[~drop]
 
 
 def programs_to_midi_classes(tokens, codec):
@@ -142,10 +155,13 @@ def build_codec(vocab_config: VocabularyConfig):
                              note_seq.MAX_MIDI_PROGRAM),
       event_codec.EventRange('drum', note_seq.MIN_MIDI_PITCH,
                              note_seq.MAX_MIDI_PITCH),
-      # a state-setting flag, encoded like `program`: applies to every
-      # subsequent pitch event until changed. 0 = not rhythm, 1 = rhythm.
-      event_codec.EventRange('rhythm', 0, 1),
   ]
+
+  if vocab_config.include_rhythm:
+    # A state-setting flag, encoded like `program`: applies to every
+    # subsequent pitch event until changed. 0 = not rhythm, 1 = rhythm.
+    # Deliberately LAST, so omitting it shifts no other event's ids.
+    event_ranges.append(event_codec.EventRange('rhythm', 0, 1))
 
   return event_codec.Codec(
       max_shift_steps=(vocab_config.steps_per_second *

@@ -47,8 +47,9 @@ class EventEncodingSpec:
   encode_event_fn: Callable[[EncodingState, EventData, event_codec.Codec],
                             Sequence[event_codec.Event]]
   # convert encoding state (at beginning of segment) into events
-  encoding_state_to_events_fn: Optional[Callable[[EncodingState],
-                                                 Sequence[event_codec.Event]]]
+  encoding_state_to_events_fn: Optional[
+      Callable[[EncodingState, event_codec.Codec],
+               Sequence[event_codec.Event]]]
   # create empty decoding state
   init_decoding_state_fn: Callable[[], DecodingState]
   # update decoding state when entering new segment
@@ -69,7 +70,8 @@ def encode_and_index_events(
     codec: event_codec.Codec,
     frame_times: Sequence[float],
     encoding_state_to_events_fn: Optional[
-        Callable[[ES], Sequence[event_codec.Event]]] = None,
+        Callable[[ES, event_codec.Codec],
+                 Sequence[event_codec.Event]]] = None,
 ) -> Tuple[Sequence[int], Sequence[int], Sequence[int],
            Sequence[int], Sequence[int]]:
   """Encode a sequence of timed events and index to audio frame times.
@@ -89,7 +91,8 @@ def encode_and_index_events(
         or more event_codec.Event objects.
     codec: An event_codec.Codec object that maps Event objects to indices.
     frame_times: Time for every audio frame.
-    encoding_state_to_events_fn: Function that transforms encoding state into a
+    encoding_state_to_events_fn: Function that transforms encoding state (and
+        the codec, which decides which optional event types exist) into a
         sequence of one or more event_codec.Event objects.
 
   Returns:
@@ -137,7 +140,7 @@ def encode_and_index_events(
     if encoding_state_to_events_fn:
       # Dump state to state events *before* processing the next event, because
       # we want to capture the state prior to the occurrence of the event.
-      for e in encoding_state_to_events_fn(state):
+      for e in encoding_state_to_events_fn(state, codec):
         state_events.append(codec.encode_event(e))
     for e in encode_event_fn(state, event_value, codec):
       events.append(codec.encode_event(e))

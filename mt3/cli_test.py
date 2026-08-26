@@ -60,6 +60,7 @@ class ParserTest(tf.test.TestCase):
     self.assertIsNone(args.lookahead_seconds)
     self.assertIsNone(args.force_program)
     self.assertFalse(args.no_rhythm)
+    self.assertFalse(args.no_rhythm_vocab)
 
   def test_force_program_out_of_range_is_rejected(self):
     with self.assertRaises(SystemExit):
@@ -72,6 +73,11 @@ class ParserTest(tf.test.TestCase):
 
   def test_no_rhythm_is_a_flag(self):
     self.assertTrue(_parse(['--no-rhythm']).no_rhythm)
+
+  def test_no_rhythm_vocab_is_a_separate_flag(self):
+    args = _parse(['--no-rhythm-vocab'])
+    self.assertTrue(args.no_rhythm_vocab)
+    self.assertFalse(args.no_rhythm)
 
 
 class ResolveTranscriberKwargsTest(tf.test.TestCase):
@@ -87,6 +93,10 @@ class ResolveTranscriberKwargsTest(tf.test.TestCase):
   def test_no_rhythm_passed_through(self):
     kwargs = cli._resolve_transcriber_kwargs(_parse(['--no-rhythm']))
     self.assertEqual(kwargs, {'no_rhythm': True})
+
+  def test_no_rhythm_vocab_passed_through(self):
+    kwargs = cli._resolve_transcriber_kwargs(_parse(['--no-rhythm-vocab']))
+    self.assertEqual(kwargs, {'rhythm_vocab': False})
 
   def test_no_rhythm_and_force_program_combine(self):
     kwargs = cli._resolve_transcriber_kwargs(
