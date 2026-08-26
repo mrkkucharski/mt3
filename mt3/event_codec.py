@@ -90,6 +90,15 @@ class Codec:
 
     raise ValueError(f'Unknown event type: {event.type}')
 
+  def has_event_type(self, event_type: str) -> bool:
+    """Whether this codec has a range of ids for `event_type`.
+
+    Optional event types (see `vocabularies.VocabularyConfig.include_rhythm`)
+    are absent from the codec entirely rather than present-but-unused, so
+    everything that encodes, decodes, or rewrites them must ask first.
+    """
+    return any(er.type == event_type for er in self._event_ranges)
+
   def event_type_range(self, event_type: str) -> Tuple[int, int]:
     """Return [min_id, max_id] for an event type."""
     offset = 0

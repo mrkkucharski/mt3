@@ -100,6 +100,13 @@ def add_transcription_task_to_registry(
   codec = vocabularies.build_codec(vocab_config)
   vocabulary = vocabularies.vocabulary_from_codec(codec)
 
+  # 'rhythm' is only a state-change event type when the codec has it at all
+  # (VocabularyConfig.include_rhythm); naming an absent event type here would
+  # raise in remove_redundant_state_changes_fn.
+  state_change_event_types = ['velocity', 'program']
+  if codec.has_event_type('rhythm'):
+    state_change_event_types.append('rhythm')
+
   output_features = {
       'targets': seqio.Feature(vocabulary=vocabulary),
       'inputs': seqio.ContinuousFeature(dtype=tf.float32, rank=2)  # pyrefly: ignore[unexpected-keyword]
@@ -170,7 +177,7 @@ def add_transcription_task_to_registry(
               targets_feature_keys=['targets']),
           run_length_encoding.remove_redundant_state_changes_fn(
               feature_key='targets', codec=codec,
-              state_change_event_types=['velocity', 'program', 'rhythm']),
+              state_change_event_types=state_change_event_types),
           functools.partial(
               preprocessors.compute_spectrograms,
               spectrogram_config=spectrogram_config),
@@ -252,6 +259,11 @@ SPECTROGRAM_CONFIG = spectrograms.SpectrogramConfig()
 # Create two vocabulary configs, one default and one with only on-off velocity.
 VOCAB_CONFIG_FULL = vocabularies.VocabularyConfig()
 VOCAB_CONFIG_NOVELOCITY = vocabularies.VocabularyConfig(num_velocity_bins=1)
+# ...and the same as the latter with the rhythm/lead flag left out of the
+# vocabulary entirely; its 'nr' abbreviation gives the tasks it registers
+# their own names (see construct_task_name).
+VOCAB_CONFIG_NOVELOCITY_NORHYTHM = vocabularies.VocabularyConfig(
+    num_velocity_bins=1, include_rhythm=False)
 
 # Transcribe MAESTRO v1.
 add_transcription_task_to_registry(
@@ -305,6 +317,23 @@ add_transcription_task_to_registry(
     dataset_config=datasets.GUITAR_PILOT_CONFIG,
     spectrogram_config=SPECTROGRAM_CONFIG,
     vocab_config=VOCAB_CONFIG_NOVELOCITY,
+    tokenize_fn=functools.partial(
+        preprocessors.tokenize_transcription_example,
+        audio_is_samples=False,
+        id_feature_key='id'),
+    onsets_only=False,
+    include_ties=True)
+
+# The same corpus and the same TFRecords, with the rhythm/lead flag dropped
+# from the vocabulary: rhythm is encoded nowhere in the targets, so the model
+# never learns it and eval never scores it. Registered under its own
+# 'guitar_pilot_notes_ties_vb1nr_*' names; select it from gin (see
+# gin/no_rhythm.gin), which must also set
+# VocabularyConfig.include_rhythm=False so the model's own codec matches.
+add_transcription_task_to_registry(
+    dataset_config=datasets.GUITAR_PILOT_CONFIG,
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
     tokenize_fn=functools.partial(
         preprocessors.tokenize_transcription_example,
         audio_is_samples=False,

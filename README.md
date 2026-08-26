@@ -107,6 +107,40 @@ with the same (program, rhythm)-aware onset+offset F1
 applied here to a real checkpoint and a real held-out split, instead of
 transcribing by hand and eyeballing note counts.
 
+### Train and transcribe without the rhythm/lead split
+
+This fork extends MT3's vocabulary with a guitar `rhythm` flag, so each guitar
+program can be predicted as a lead or a chordal-accompaniment track. It is
+optional at both ends. Add `mt3/gin/no_rhythm.gin` to a training run and the
+`rhythm` event range is dropped from the codec entirely: nothing encodes it
+into the targets, the model cannot emit it, and evaluation collapses the split
+on the reference as well as the estimate.
+
+```sh
+modal run --detach mt3/scripts/modal_train.py \
+  --train-steps 5000 --save-period 1000 \
+  --no-rhythm --model-dir /workspace/runs/<your-no-rhythm-run>
+```
+
+The corpus is untouched — `data/pilot` keeps its canonical `<slug>[:rhythm]`
+track names and no TFRecord needs rebuilding, since rhythm is only read at
+encode time. A rhythm-free run therefore also stays checkpoint-compatible in
+both directions: `rhythm` is the last event range, so dropping it shifts no
+other token's id, and the padded vocabulary size is 1536 either way.
+
+Because nothing inside a checkpoint records which mode produced it, a
+rhythm-free run needs its own `MODEL_DIR` (`--model-dir` is required with
+`--no-rhythm` for that reason), and its checkpoints must be read back with the
+matching flag:
+
+```sh
+uv run mt3-transcribe --no-rhythm-vocab ...
+uv run mt3-evaluate --no-rhythm-vocab ...
+```
+
+That is a different flag from `mt3-transcribe --no-rhythm`, which ignores the
+rhythm predictions of a checkpoint that *was* trained with them.
+
 ### Export a transcription as a reviewable REAPER project
 
 ```sh

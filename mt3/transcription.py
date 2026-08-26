@@ -134,8 +134,13 @@ class TranscriptionResult:
   force_program: int | None = None
   # whether rhythm tokens were ignored, collapsing the rhythm/lead split
   # (see Transcriber's no_rhythm). Always true when force_program is set,
-  # which implies it.
+  # which implies it, and when rhythm_vocab is False.
   no_rhythm: bool = False
+  # whether the checkpoint's vocabulary carries the rhythm/lead flag at all
+  # (see Transcriber's rhythm_vocab). False means the model was trained with
+  # gin/no_rhythm.gin and cannot emit rhythm tokens in the first place --
+  # a different thing from decoding a rhythm-aware model with no_rhythm.
+  rhythm_vocab: bool = True
 
   def as_dict(self) -> dict[str, object]:
     return {
@@ -154,6 +159,7 @@ class TranscriptionResult:
         'cost_multiplier': self.cost_multiplier,
         'force_program': self.force_program,
         'no_rhythm': self.no_rhythm,
+        'rhythm_vocab': self.rhythm_vocab,
     }
 
 
@@ -319,6 +325,15 @@ class Transcriber:
   every WAV file.  Keeping the instance alive avoids restoring the checkpoint
   for each request.
 
+  ``rhythm_vocab`` likewise must match the checkpoint: pass False for one
+  trained with gin/no_rhythm.gin, so the codec is rebuilt without the rhythm
+  event range the model never saw.  Because that range is last, every other
+  event keeps its token ids and the padded vocabulary size is unchanged, so
+  the mismatch is silent rather than a shape error -- a rhythm-aware
+  checkpoint decoded with ``rhythm_vocab=False`` would turn each of its
+  rhythm tokens into an invalid event.  Use ``no_rhythm`` (not this) to
+  suppress the rhythm/lead split of a rhythm-aware checkpoint.
+
   ``input_length`` is the encoder window in spectrogram frames and must match
   the window the checkpoint was trained with (256 for the ~2 s baseline, 512
   for a checkpoint adapted with gin/context_4s.gin).  It is a plain constructor
@@ -352,7 +367,8 @@ class Transcriber:
                lookahead_frames: int = 0,
                lookback_frames: int = 0,
                force_program: int | None = None,
-               no_rhythm: bool = False):
+               no_rhythm: bool = False,
+               rhythm_vocab: bool = True):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
@@ -368,8 +384,11 @@ class Transcriber:
     self.force_program = force_program
     # force_program implies it (NoteDecodingState.__post_init__ does the same
     # for the decoding state), so the recorded/reported value matches what
-    # decoding actually did rather than what was passed in.
-    self.no_rhythm = no_rhythm or force_program is not None
+    # decoding actually did rather than what was passed in. A checkpoint whose
+    # vocabulary has no rhythm range implies it too, trivially: there are no
+    # rhythm tokens for the model to emit.
+    self.rhythm_vocab = rhythm_vocab
+    self.no_rhythm = no_rhythm or force_program is not None or not rhythm_vocab
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
     self.lookahead_frames = lookahead_frames
@@ -377,7 +396,8 @@ class Transcriber:
     self.partitioner = partitioning.PjitPartitioner(num_partitions=1)
     self.spectrogram_config = spectrograms.SpectrogramConfig()
     self.codec = vocabularies.build_codec(
-        vocabularies.VocabularyConfig(num_velocity_bins=1))
+        vocabularies.VocabularyConfig(num_velocity_bins=1,
+                                      include_rhythm=rhythm_vocab))
     self.vocabulary = vocabularies.vocabulary_from_codec(self.codec)
     self.output_features = {
         'inputs': seqio.ContinuousFeature(dtype=tf.float32, rank=2),
@@ -414,6 +434,9 @@ class Transcriber:
         'from mt3 import vocabularies',
         'VOCAB_CONFIG=@vocabularies.VocabularyConfig()',
         'vocabularies.VocabularyConfig.num_velocity_bins=1',
+        # Must agree with self.codec: model.gin builds its own codec from
+        # these bindings to size the output vocabulary.
+        f'vocabularies.VocabularyConfig.include_rhythm={self.rhythm_vocab}',
     ]
     with gin.unlock_config():
       gin.parse_config_files_and_bindings(
@@ -555,4 +578,5 @@ class Transcriber:
             self.geometry.lookahead_frames, self.spectrogram_config),
         cost_multiplier=window_frames / self.hop_frames,
         force_program=self.force_program,
-        no_rhythm=self.no_rhythm)
+        no_rhythm=self.no_rhythm,
+        rhythm_vocab=self.rhythm_vocab)

@@ -74,6 +74,14 @@ def _parser() -> argparse.ArgumentParser:
            'rhythm-only half of --force-program (which implies this), for '
            'input where instrument identity is still worth decoding but the '
            'rhythm/lead split would only be a source of fragmentation.')
+  parser.add_argument(
+      '--no-rhythm-vocab', action='store_true',
+      help='The checkpoint was TRAINED without the rhythm/lead flag (with '
+           'gin/no_rhythm.gin), so build the codec without the rhythm event '
+           'range at all. This is a property of the checkpoint, not a '
+           'decoding preference -- unlike --no-rhythm (which it implies), '
+           'passing it for a rhythm-trained checkpoint turns that model\'s '
+           'rhythm tokens into invalid events rather than ignoring them.')
   return parser
 
 
@@ -102,6 +110,8 @@ def _resolve_transcriber_kwargs(args: argparse.Namespace) -> dict:
     kwargs['force_program'] = args.force_program
   if args.no_rhythm:
     kwargs['no_rhythm'] = True
+  if args.no_rhythm_vocab:
+    kwargs['rhythm_vocab'] = False
   return kwargs
 
 
@@ -135,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.force_program is not None:
       print(f'Program and rhythm tokens ignored; every note forced to program '
             f'{result.force_program} as a single non-rhythm instrument.')
+    elif not result.rhythm_vocab:
+      print('Rhythm-free vocabulary; the model has no rhythm/lead tokens, one '
+            'instrument per program.')
     elif result.no_rhythm:
       print('Rhythm tokens ignored; every note decoded as non-rhythm, one '
             'instrument per program.')

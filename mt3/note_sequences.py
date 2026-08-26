@@ -253,6 +253,7 @@ def instrument_rhythms(
 
 def note_sequence_to_onsets_and_offsets_and_programs(
     ns: note_seq.NoteSequence,
+    include_rhythm: bool = True,
 ) -> Tuple[Sequence[float], Sequence[NoteEventData]]:
   """Extract onset & offset times and pitches & programs from a NoteSequence.
 
@@ -260,13 +261,33 @@ def note_sequence_to_onsets_and_offsets_and_programs(
 
   Args:
     ns: NoteSequence from which to extract onsets and offsets.
+    include_rhythm: whether to read each note's rhythm/lead flag from
+        `ns.instrument_infos`. False reports every note as non-rhythm, which
+        also drops the flag from the sort key below -- so a rhythm-labelled
+        NoteSequence yields byte-identical events to an unlabelled one, rather
+        than merely equivalent ones ordered differently -- and trims notes
+        that the collapse has just made indistinguishable (see below). Pass
+        `codec.has_event_type('rhythm')`.
 
   Returns:
     times: A list of note onset and offset times.
     values: A list of NoteEventData objects where velocity is zero for note
         offsets.
   """
-  rhythm_by_instrument = instrument_rhythms(ns)
+  if not include_rhythm:
+    # Collapsing rhythm merges two instrument groups the corpus kept apart, so
+    # notes that were legal under the rhythm-aware encoding can now collide on
+    # one decoder key: a lead and a rhythm guitar sounding the same pitch of
+    # the same program at the same time become two onsets and two offsets for
+    # (pitch, program). The encoding cannot represent that -- decoding drops
+    # the second note-off as an invalid event and emits a spurious
+    # MIN_NOTE_DURATION note -- so project the sequence into what the collapsed
+    # key space can express, exactly as tokenize_guitarset_example already does
+    # for corpora that overlap notes within a single instrument. Notes that do
+    # NOT collide are untouched, so this is a no-op for a corpus whose parts
+    # never play in unison.
+    ns = trim_overlapping_notes(ns)
+  rhythm_by_instrument = instrument_rhythms(ns) if include_rhythm else {}
   def rhythm(note) -> bool:
     return rhythm_by_instrument.get(note.instrument, False)
 
@@ -322,28 +343,41 @@ def note_event_data_to_events(
         return [event_codec.Event('velocity', velocity_bin),
                 event_codec.Event('drum', value.pitch)]
       else:
-        # program + rhythm + velocity + pitch
-        rhythm = bool(value.rhythm)
+        # program [+ rhythm] + velocity + pitch. A codec built without the
+        # rhythm range (VocabularyConfig.include_rhythm=False) emits no rhythm
+        # event and pins the flag to False, so a corpus that labels rhythm
+        # parts still encodes exactly like one that doesn't.
+        include_rhythm = codec.has_event_type('rhythm')
+        rhythm = bool(value.rhythm) and include_rhythm
         if state is not None:
           state.active_pitches[
               (value.pitch, int(value.program), rhythm)] = velocity_bin
-        return [event_codec.Event('program', value.program),
-                event_codec.Event('rhythm', int(rhythm)),
-                event_codec.Event('velocity', velocity_bin),
-                event_codec.Event('pitch', value.pitch)]
+        events = [event_codec.Event('program', value.program)]
+        if include_rhythm:
+          events.append(event_codec.Event('rhythm', int(rhythm)))
+        return events + [event_codec.Event('velocity', velocity_bin),
+                         event_codec.Event('pitch', value.pitch)]
 
 
 def note_encoding_state_to_events(
-    state: NoteEncodingState
+    state: NoteEncodingState,
+    codec: event_codec.Codec,
 ) -> Sequence[event_codec.Event]:
-  """Output program, rhythm and pitch events for active notes, then a tie event."""
+  """Output program, rhythm and pitch events for active notes, then a tie event.
+
+  The rhythm events are omitted for a codec built without the rhythm range
+  (see `note_event_data_to_events`), which also guarantees every key's rhythm
+  flag is False there.
+  """
+  include_rhythm = codec.has_event_type('rhythm')
   events = []
   for pitch, program, rhythm in sorted(
       state.active_pitches.keys(), key=lambda k: (k[1], k[2], k[0])):
     if state.active_pitches[(pitch, program, rhythm)]:
-      events += [event_codec.Event('program', program),
-                 event_codec.Event('rhythm', int(rhythm)),
-                 event_codec.Event('pitch', pitch)]
+      events.append(event_codec.Event('program', program))
+      if include_rhythm:
+        events.append(event_codec.Event('rhythm', int(rhythm)))
+      events.append(event_codec.Event('pitch', pitch))
   events.append(event_codec.Event('tie', 0))
   return events
 

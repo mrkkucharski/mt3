@@ -153,7 +153,8 @@ def tokenize_transcription_example(
     else:
       ns = note_seq.apply_sustain_control_changes(ns)
       times, values = (
-          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(ns))
+          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(
+              ns, include_rhythm=codec.has_event_type('rhythm')))
 
     # The original NoteSequence can have a lot of control changes we don't need;
     # delete them.
@@ -325,7 +326,8 @@ def tokenize_example_with_program_lookup(
       times, values = note_sequences.note_sequence_to_onsets(ns)
     else:
       times, values = (
-          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(ns))
+          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(
+              ns, include_rhythm=codec.has_event_type('rhythm')))
 
     # The original NoteSequence can have a lot of control changes we don't need;
     # delete them.
@@ -546,7 +548,8 @@ def tokenize_slakh_example(
       times, values = note_sequences.note_sequence_to_onsets(ns)
     else:
       times, values = (
-          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(ns))
+          note_sequences.note_sequence_to_onsets_and_offsets_and_programs(
+              ns, include_rhythm=codec.has_event_type('rhythm')))
 
     (events, event_start_indices, event_end_indices,
      state_events, state_event_indices) = (

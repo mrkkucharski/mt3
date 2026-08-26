@@ -98,8 +98,10 @@ class _FakeTranscriber:
 
   instances: list["_FakeTranscriber"] = []
 
-  def __init__(self, checkpoint_path, predicted: note_seq.NoteSequence):
+  def __init__(self, checkpoint_path, predicted: note_seq.NoteSequence,
+               rhythm_vocab: bool = True):
     self.checkpoint_path = checkpoint_path
+    self.rhythm_vocab = rhythm_vocab
     self._predicted = predicted
     _FakeTranscriber.instances.append(self)
 
@@ -116,7 +118,8 @@ def test_evaluate_scores_a_perfect_prediction_as_f1_one(tmp_path, monkeypatch):
   import mt3.transcription as transcription_module
   monkeypatch.setattr(
       transcription_module, "Transcriber",
-      lambda checkpoint_path: _FakeTranscriber(checkpoint_path, copy.deepcopy(ref_ns)))
+      lambda checkpoint_path, rhythm_vocab=True: _FakeTranscriber(
+          checkpoint_path, copy.deepcopy(ref_ns), rhythm_vocab))
 
   result = evaluate_checkpoint.evaluate(tmp_path / "checkpoint", dataset_dir, "test")
 
@@ -134,12 +137,50 @@ def test_evaluate_scores_a_missed_prediction_below_one(tmp_path, monkeypatch):
   import mt3.transcription as transcription_module
   monkeypatch.setattr(
       transcription_module, "Transcriber",
-      lambda checkpoint_path: _FakeTranscriber(checkpoint_path, empty_ns))
+      lambda checkpoint_path, rhythm_vocab=True: _FakeTranscriber(
+          checkpoint_path, empty_ns, rhythm_vocab))
 
   result = evaluate_checkpoint.evaluate(tmp_path / "checkpoint", dataset_dir, "test")
 
   assert result["mean_f1"] < 1.0
   assert result["examples"][0]["est_notes"] == 0
+
+
+def test_no_rhythm_vocab_scores_a_rhythm_free_prediction_as_f1_one(
+    tmp_path, monkeypatch):
+  """A checkpoint trained without the rhythm flag can still match this corpus.
+
+  The fixture's only part is a `:rhythm` guitar, so the reference carries the
+  label whatever the model does; a rhythm-free prediction of the same note
+  must score 1.0 rather than being counted as both a miss and a false
+  positive.
+  """
+  dataset_dir = tmp_path / "dataset"
+  record = _write_fixture(dataset_dir)
+  ref_ns = evaluate_checkpoint.midi_to_note_sequence(
+      dataset_dir / record["midi_path"], record["id"], record["audio_path"], record)
+  est_ns = copy.deepcopy(ref_ns)
+  for info in est_ns.instrument_infos:
+    info.name = info.name.removesuffix(":rhythm")
+
+  _FakeTranscriber.instances.clear()
+  import mt3.transcription as transcription_module
+  monkeypatch.setattr(
+      transcription_module, "Transcriber",
+      lambda checkpoint_path, rhythm_vocab=True: _FakeTranscriber(
+          checkpoint_path, est_ns, rhythm_vocab))
+
+  result = evaluate_checkpoint.evaluate(
+      tmp_path / "checkpoint", dataset_dir, "test", rhythm_vocab=False)
+
+  assert result["mean_f1"] == pytest.approx(1.0)
+  assert _FakeTranscriber.instances[-1].rhythm_vocab is False
+
+  # The same pair scored rhythm-aware is the failure this guards against.
+  _FakeTranscriber.instances.clear()
+  assert evaluate_checkpoint.evaluate(
+      tmp_path / "checkpoint", dataset_dir, "test")["mean_f1"] < 1.0
+  assert _FakeTranscriber.instances[-1].rhythm_vocab is True
 
 
 def test_evaluate_raises_for_a_split_with_no_examples(tmp_path):
@@ -159,7 +200,8 @@ def test_main_writes_a_report(tmp_path, monkeypatch, capsys):
   import mt3.transcription as transcription_module
   monkeypatch.setattr(
       transcription_module, "Transcriber",
-      lambda checkpoint_path: _FakeTranscriber(checkpoint_path, copy.deepcopy(ref_ns)))
+      lambda checkpoint_path, rhythm_vocab=True: _FakeTranscriber(
+          checkpoint_path, copy.deepcopy(ref_ns), rhythm_vocab))
 
   report_path = tmp_path / "report.json"
   checkpoint_dir = tmp_path / "checkpoint"

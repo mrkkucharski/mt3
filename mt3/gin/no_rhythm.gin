@@ -1,0 +1,43 @@
+# Train/eval with the guitar rhythm/lead flag left out of the vocabulary
+# entirely.
+#
+# The corpus is unchanged -- `data/pilot`'s NoteSequences keep their canonical
+# `<slug>[:rhythm]` instrument names and no TFRecord needs rebuilding. This
+# overlay drops the `rhythm` event range from the codec, which is what makes
+# the flag invisible to training: nothing encodes a rhythm token into the
+# targets, the decoder can never emit one, and `metrics` collapses the
+# rhythm/lead split on BOTH the reference and the estimate before scoring
+# (the reference NoteSequence still carries the labels, so without that
+# collapse a rhythm-free model would be scored against tracks it cannot
+# produce).
+#
+# The single binding below does double duty: it rebuilds the model's codec
+# without the range, and -- because `tasks.construct_task_name` derives the
+# seqio task name from the same VOCAB_CONFIG -- it also switches the run onto
+# the separately registered `..._vb1nr_*` tasks, whose preprocessors encode
+# targets with the matching rhythm-free codec. The two therefore cannot drift
+# apart.
+#
+# Checkpoint compatibility: `rhythm` is the last event range, so dropping it
+# shifts no other event's token ids, and `vocabularies.num_embeddings` rounds
+# the vocabulary up to the same multiple of 128 either way. A rhythm-free run
+# still restores from the official checkpoint_0 (or from a rhythm-trained
+# checkpoint of this project). Nothing in a checkpoint records which mode
+# produced it, though, so keep rhythm-free runs in their own MODEL_DIR and
+# transcribe them with `mt3-transcribe --no-rhythm-vocab`.
+#
+# Load LAST, after the run's own config:
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/train.gin
+#   --gin_file=mt3/gin/guitar_pilot_finetune_modal.gin
+#   --gin_file=mt3/gin/no_rhythm.gin
+#
+# The same overlay serves eval.gin and infer.gin, which build their task names
+# from the same VOCAB_CONFIG; a checkpoint must be read back in the mode it was
+# trained in, and there is nothing in the checkpoint to check that against.
+
+from __gin__ import dynamic_registration
+
+from mt3 import vocabularies
+
+vocabularies.VocabularyConfig.include_rhythm = False

@@ -176,7 +176,8 @@ CONTEXT_4S_MODEL_DIR = '/workspace/runs/guitar_pilot_finetune_64ex_it2_4s'
 def _t5x_train_command(train_steps: int,
                        save_period: int,
                        context_4s: bool = False,
-                       model_dir: str | None = None) -> list[str]:
+                       model_dir: str | None = None,
+                       no_rhythm: bool = False) -> list[str]:
   """Builds the t5x.train argv.
 
   `context_4s` appends gin/context_4s.gin, which rebinds TASK_FEATURE_LENGTHS
@@ -188,13 +189,27 @@ def _t5x_train_command(train_steps: int,
   4 s run cannot silently write into the 2 s run's directory. Pass `model_dir`
   to choose the destination explicitly; the flag is not usable in a way that
   reuses the 2 s directory by accident.
+
+  `no_rhythm` appends gin/no_rhythm.gin, which drops the rhythm/lead flag from
+  the vocabulary (and thereby from the targets, the decoder, and the metrics)
+  without touching the corpus. It demands an explicit `model_dir` for the same
+  reason `context_4s` redirects one: the resulting checkpoints are trained on
+  a different target encoding than the rhythm-aware run's, and nothing inside
+  a checkpoint records which of the two produced it.
   """
+  if no_rhythm and not model_dir:
+    raise ValueError(
+        'no_rhythm requires an explicit model_dir: rhythm-free checkpoints '
+        'must not be interleaved with a rhythm-trained run\'s directory.')
+
   gin_files = [
       '--gin_file=mt3/gin/model.gin',
       '--gin_file=mt3/gin/train.gin',
       '--gin_file=mt3/gin/guitar_pilot_finetune_modal.gin',
   ]
   overrides = []
+  if no_rhythm:
+    gin_files.append('--gin_file=mt3/gin/no_rhythm.gin')
   if context_4s:
     gin_files.append('--gin_file=mt3/gin/context_4s.gin')
     overrides.append(
@@ -235,7 +250,8 @@ def _t5x_train_command(train_steps: int,
 def run_training(train_steps: int = 1,
                  save_period: int = 25,
                  context_4s: bool = False,
-                 model_dir: str | None = None) -> None:
+                 model_dir: str | None = None,
+                 no_rhythm: bool = False) -> None:
   """Runs one t5x.train invocation and commits the run-artifacts volume.
 
   `train_steps` is relative to wherever the restored checkpoint currently
@@ -244,14 +260,16 @@ def run_training(train_steps: int = 1,
   T5X itself runs as a subprocess, not in this function's own process.
 
   `context_4s` switches the run to the ~4 s window and redirects MODEL_DIR
-  accordingly; see _t5x_train_command.
+  accordingly; `no_rhythm` trains without the rhythm/lead flag and requires
+  its own `model_dir`. See _t5x_train_command.
   """
   from mt3.model_download import rebuild_checkpoint_0_view
 
   rebuild_checkpoint_0_view(Path('/workspace/model/mt3'))
   _ensure_cuda_library_path()
 
-  command = _t5x_train_command(train_steps, save_period, context_4s, model_dir)
+  command = _t5x_train_command(train_steps, save_period, context_4s, model_dir,
+                               no_rhythm)
   print('t5x command:', ' '.join(command), flush=True)
   result = subprocess.run(command, cwd='/workspace/mt3')
   runs_volume.commit()
@@ -287,6 +305,12 @@ def check_gpu() -> None:
 def main(train_steps: int = 1,
          save_period: int = 25,
          context_4s: bool = False,
-         model_dir: str | None = None) -> None:
-  run_training.remote(train_steps=train_steps, save_period=save_period,
-                      context_4s=context_4s, model_dir=model_dir)
+         model_dir: str | None = None,
+         no_rhythm: bool = False) -> None:
+  # .spawn(), not .remote(): .remote() blocks the local process on an open
+  # connection for the whole run, so a local disconnect kills the remote job
+  # even with `modal run --detach` (PROJECT_LOG.md, 2026-08-09, "modal_train.py
+  # switched from a blocking .remote() call to .spawn()").
+  run_training.spawn(train_steps=train_steps, save_period=save_period,
+                     context_4s=context_4s, model_dir=model_dir,
+                     no_rhythm=no_rhythm)
