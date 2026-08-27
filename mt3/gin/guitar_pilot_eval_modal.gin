@@ -1,0 +1,47 @@
+# Modal one-off evaluation entrypoint (mt3/scripts/modal_eval.py): score an
+# arbitrary guitar_pilot checkpoint against whatever eval TFRecord currently
+# sits on the `mt3-guitar-data` volume, using T5X's own `t5x.eval`
+# (eval.gin) rather than a training run's periodic infer_eval.
+#
+# Only CHECKPOINT_PATH and EVAL_OUTPUT_DIR are left for the CLI to override
+# per invocation (plain string macros, which resolve fine as CLI overrides
+# under dynamic_registration). The `@seqio.PyLoggingLogger`-style
+# configurable *references* below cannot be supplied from the CLI at all --
+# dynamic_registration resolves `@Name` references using the importing
+# file's own aliases, and a bare CLI override has no such file context to
+# resolve against (confirmed the hard way: `ValueError: No configurable
+# matching reference '@seqio.PyLoggingLogger'` when passed via
+# `--gin.seqio.Evaluator.logger_cls=[...]`) -- so they must be set here,
+# inside a file that itself imports `seqio`, mirroring train.gin's
+# identical binding.
+#
+# Load after model.gin and eval.gin:
+#   --gin_file=mt3/gin/model.gin
+#   --gin_file=mt3/gin/eval.gin
+#   --gin_file=mt3/gin/guitar_pilot_eval_modal.gin
+
+from __gin__ import dynamic_registration
+
+import seqio
+from t5x import utils
+
+TASK_PREFIX = 'guitar_pilot_notes_ties'
+# eval.gin's own default (TASK_SUFFIX='test') doesn't match this project's
+# actual registered eval task name -- datasets.py's GUITAR_PILOT_CONFIG
+# names its InferEvalSplit suffix 'eval_test' (confirmed against the
+# training-time infer_eval JSONL's filename,
+# guitar_pilot_notes_ties_vb1_eval_test-metrics.jsonl), not 'test'.
+TASK_SUFFIX = 'eval_test'
+NUM_VELOCITY_BINS = 1
+PROGRAM_GRANULARITY = 'full'
+TASK_FEATURE_LENGTHS = {'inputs': 256, 'targets': 1024}
+
+# eval.gin defaults to use_cached=True (a pre-built SeqIO TFDS cache dir),
+# but this project's tasks are never cached -- train.gin always sets
+# USE_CACHED_TASKS=False and reads the TFRecord directly.
+utils.DatasetConfig.use_cached = False
+
+# Matches train.gin's identical binding -- without it, seqio falls back to
+# its own library default, which writes no metrics anywhere (no JSONL, no
+# TensorBoard events, no stdout summary).
+seqio.Evaluator.logger_cls = [@seqio.PyLoggingLogger, @seqio.TensorBoardLogger, @seqio.JSONLogger]
