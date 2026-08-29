@@ -59,13 +59,12 @@ def _load_split_records(dataset_dir: Path, split: str) -> list[dict]:
 
 
 def evaluate(checkpoint_path: Path, dataset_dir: Path, split: str,
-             rhythm_vocab: bool = True) -> dict:
+             rhythm_vocab: bool = False) -> dict:
   """Transcribes every `split` example and scores it against its corpus MIDI.
 
-  `rhythm_vocab=False` evaluates a checkpoint trained without the rhythm/lead
-  flag (gin/no_rhythm.gin): the codec is rebuilt without it, and scoring
-  collapses the rhythm/lead split on the reference too -- the corpus MIDI
-  keeps its `:rhythm` track names regardless of how the model was trained.
+  Rhythm-free evaluation is the default. Pass `rhythm_vocab=True` only for a
+  checkpoint trained with the optional rhythm/lead flag; it then scores that
+  distinction on both prediction and reference.
   """
   # Delayed: these pull in JAX/T5X/TensorFlow, which argument parsing (and
   # --help) should not pay for.
@@ -120,15 +119,15 @@ def main(argv: list[str] | None = None) -> int:
                       help="Dataset directory containing manifest.jsonl.")
   parser.add_argument("--split", default="test", help="Manifest split to evaluate.")
   parser.add_argument("--report", type=Path, help="Write the full JSON report here.")
-  parser.add_argument("--no-rhythm-vocab", action="store_true",
-                      help="The checkpoint was trained without the rhythm/lead "
-                           "flag (gin/no_rhythm.gin); score it program-only.")
+  parser.add_argument("--include-rhythm-vocab", action="store_true",
+                      help="The checkpoint was trained with the optional "
+                           "rhythm/lead flag; score by (program, rhythm).")
   args = parser.parse_args(argv)
 
   result = evaluate(
       args.checkpoint.expanduser().resolve(), args.dataset.expanduser().resolve(),
-      args.split, rhythm_vocab=not args.no_rhythm_vocab)
-  scored_by = "program" if args.no_rhythm_vocab else "(program, rhythm)"
+      args.split, rhythm_vocab=args.include_rhythm_vocab)
+  scored_by = "(program, rhythm)" if args.include_rhythm_vocab else "program"
   print(f"\n{result['example_count']} {args.split} example(s), "
         f"mean {scored_by} onset+offset F1 = {result['mean_f1']:.3f}")
 

@@ -325,14 +325,15 @@ class Transcriber:
   every WAV file.  Keeping the instance alive avoids restoring the checkpoint
   for each request.
 
-  ``rhythm_vocab`` likewise must match the checkpoint: pass False for one
-  trained with gin/no_rhythm.gin, so the codec is rebuilt without the rhythm
-  event range the model never saw.  Because that range is last, every other
-  event keeps its token ids and the padded vocabulary size is unchanged, so
-  the mismatch is silent rather than a shape error -- a rhythm-aware
-  checkpoint decoded with ``rhythm_vocab=False`` would turn each of its
-  rhythm tokens into an invalid event.  Use ``no_rhythm`` (not this) to
-  suppress the rhythm/lead split of a rhythm-aware checkpoint.
+  ``rhythm_vocab`` likewise must match the checkpoint. It defaults to False,
+  because rhythm-free checkpoints are the project default; pass True for a
+  checkpoint deliberately trained with the optional rhythm/lead flag. Because
+  that range is last, every other event keeps its token ids and the padded
+  vocabulary size is unchanged, so the mismatch is silent rather than a shape
+  error -- a rhythm-aware checkpoint decoded with ``rhythm_vocab=False``
+  would turn each of its rhythm tokens into an invalid event. Use
+  ``no_rhythm`` (not this) to suppress the rhythm/lead split of a
+  rhythm-aware checkpoint.
 
   ``input_length`` is the encoder window in spectrogram frames and must match
   the window the checkpoint was trained with (256 for the ~2 s baseline, 512
@@ -368,7 +369,7 @@ class Transcriber:
                lookback_frames: int = 0,
                force_program: int | None = None,
                no_rhythm: bool = False,
-               rhythm_vocab: bool = True):
+               rhythm_vocab: bool = False):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')

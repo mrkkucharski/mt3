@@ -24,7 +24,8 @@
 # still restores from the official checkpoint_0 (or from a rhythm-trained
 # checkpoint of this project). Nothing in a checkpoint records which mode
 # produced it, though, so keep rhythm-free runs in their own MODEL_DIR and
-# transcribe them with `mt3-transcribe --no-rhythm-vocab`.
+# transcribe them with the rhythm-free default (`mt3-transcribe` without
+# `--include-rhythm-vocab`).
 #
 # Load LAST, after the run's own config:
 #   --gin_file=mt3/gin/model.gin

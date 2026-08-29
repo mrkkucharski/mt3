@@ -146,7 +146,7 @@ def test_evaluate_scores_a_missed_prediction_below_one(tmp_path, monkeypatch):
   assert result["examples"][0]["est_notes"] == 0
 
 
-def test_no_rhythm_vocab_scores_a_rhythm_free_prediction_as_f1_one(
+def test_rhythm_free_default_scores_a_rhythm_free_prediction_as_f1_one(
     tmp_path, monkeypatch):
   """A checkpoint trained without the rhythm flag can still match this corpus.
 
@@ -170,8 +170,7 @@ def test_no_rhythm_vocab_scores_a_rhythm_free_prediction_as_f1_one(
       lambda checkpoint_path, rhythm_vocab=True: _FakeTranscriber(
           checkpoint_path, est_ns, rhythm_vocab))
 
-  result = evaluate_checkpoint.evaluate(
-      tmp_path / "checkpoint", dataset_dir, "test", rhythm_vocab=False)
+  result = evaluate_checkpoint.evaluate(tmp_path / "checkpoint", dataset_dir, "test")
 
   assert result["mean_f1"] == pytest.approx(1.0)
   assert _FakeTranscriber.instances[-1].rhythm_vocab is False
@@ -179,7 +178,7 @@ def test_no_rhythm_vocab_scores_a_rhythm_free_prediction_as_f1_one(
   # The same pair scored rhythm-aware is the failure this guards against.
   _FakeTranscriber.instances.clear()
   assert evaluate_checkpoint.evaluate(
-      tmp_path / "checkpoint", dataset_dir, "test")["mean_f1"] < 1.0
+      tmp_path / "checkpoint", dataset_dir, "test", rhythm_vocab=True)["mean_f1"] < 1.0
   assert _FakeTranscriber.instances[-1].rhythm_vocab is True
 
 
@@ -215,4 +214,4 @@ def test_main_writes_a_report(tmp_path, monkeypatch, capsys):
   assert exit_code == 0
   written = json.loads(report_path.read_text())
   assert written["mean_f1"] == pytest.approx(1.0)
-  assert "mean (program, rhythm) onset+offset F1" in capsys.readouterr().out
+  assert "mean program onset+offset F1" in capsys.readouterr().out

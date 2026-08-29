@@ -75,13 +75,13 @@ def _parser() -> argparse.ArgumentParser:
            'input where instrument identity is still worth decoding but the '
            'rhythm/lead split would only be a source of fragmentation.')
   parser.add_argument(
-      '--no-rhythm-vocab', action='store_true',
-      help='The checkpoint was TRAINED without the rhythm/lead flag (with '
-           'gin/no_rhythm.gin), so build the codec without the rhythm event '
-           'range at all. This is a property of the checkpoint, not a '
-           'decoding preference -- unlike --no-rhythm (which it implies), '
-           'passing it for a rhythm-trained checkpoint turns that model\'s '
-           'rhythm tokens into invalid events rather than ignoring them.')
+      '--include-rhythm-vocab', action='store_true',
+      help='The checkpoint was TRAINED with the optional rhythm/lead flag, '
+           'so build the codec with its rhythm event range. By default the '
+           'rhythm-free vocabulary is used. This is a property of the '
+           'checkpoint, not a decoding preference: omitting it for a '
+           'rhythm-trained checkpoint turns its rhythm tokens into invalid '
+           'events rather than merely ignoring them.')
   return parser
 
 
@@ -110,8 +110,10 @@ def _resolve_transcriber_kwargs(args: argparse.Namespace) -> dict:
     kwargs['force_program'] = args.force_program
   if args.no_rhythm:
     kwargs['no_rhythm'] = True
-  if args.no_rhythm_vocab:
-    kwargs['rhythm_vocab'] = False
+  # Rhythm-free checkpoints are the project default. The opt-in is required
+  # for legacy or deliberately rhythm-aware checkpoints.
+  if args.include_rhythm_vocab:
+    kwargs['rhythm_vocab'] = True
   return kwargs
 
 
