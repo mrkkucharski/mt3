@@ -22,13 +22,44 @@ always reproduce the pre-lookback (lookahead-only) geometry exactly.
 import math
 import tempfile
 import types
+from pathlib import Path
 
+import mido
+import note_seq
 import numpy as np
 import tensorflow as tf
 from mt3 import note_sequences
 from mt3 import preprocessors
 from mt3 import spectrograms
 from mt3 import transcription
+
+
+class PitchBendMidiExportTest(tf.test.TestCase):
+
+  def test_rpn_and_bend_precede_same_tick_note_on(self):
+    ns = note_seq.NoteSequence(ticks_per_quarter=220)
+    ns.instrument_infos.add(instrument=0, name='distortion-guitar')
+    ns.notes.add(
+        start_time=0.0, end_time=1.0, pitch=64, velocity=100,
+        program=30, instrument=0)
+    ns.pitch_bends.add(
+        time=0.0, bend=4096, program=30, instrument=0)
+    with tempfile.TemporaryDirectory() as tmp:
+      path = Path(tmp) / 'bend.mid'
+      transcription.write_multitrack_midi(ns, path)
+      midi = mido.MidiFile(path)
+
+    messages = [message for message in midi.tracks[1]
+                if not message.is_meta]
+    self.assertEqual(
+        [('control_change', 101, 0), ('control_change', 100, 0),
+         ('control_change', 6, 12), ('control_change', 38, 0)],
+        [(message.type, message.control, message.value)
+         for message in messages[1:5]])
+    self.assertEqual('pitchwheel', messages[5].type)
+    self.assertEqual(4096, messages[5].pitch)
+    self.assertEqual('note_on', messages[6].type)
+    self.assertEqual(0, sum(message.time for message in messages[:7]))
 
 
 class WindowGeometryTest(tf.test.TestCase):

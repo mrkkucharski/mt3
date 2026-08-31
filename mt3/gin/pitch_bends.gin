@@ -1,0 +1,11 @@
+# Opt into the fixed integer-semitone pitch-bend vocabulary (-12..+12).
+#
+# Load after the base run config and after gin/no_rhythm.gin when rhythm is
+# disabled. The codec always reserves the two rhythm token positions in this
+# mode, so pitch-bend ids are identical in rhythm-aware and rhythm-free runs.
+
+from __gin__ import dynamic_registration
+
+from mt3 import vocabularies
+
+vocabularies.VocabularyConfig.include_pitch_bends = True

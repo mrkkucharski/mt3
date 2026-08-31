@@ -33,6 +33,8 @@ DECODED_INVALID_ID = -2
 DEFAULT_STEPS_PER_SECOND = 100
 DEFAULT_MAX_SHIFT_SECONDS = 10
 DEFAULT_NUM_VELOCITY_BINS = 127
+PITCH_BEND_RANGE_SEMITONES = 12
+_RESERVED_RHYTHM_EVENT_TYPE = '_reserved_rhythm'
 
 
 @dataclasses.dataclass
@@ -49,6 +51,10 @@ class VocabularyConfig:
   # the vocabulary up to the same multiple of 128 either way -- so checkpoints
   # remain mutually restorable across the two settings.
   include_rhythm: bool = True
+  # Whether to model channel-wide pitch bends as integer semitone offsets in
+  # [-12, 12]. When enabled, the two rhythm ids are physically allocated even
+  # if include_rhythm=False, so bend ids never move when rhythm is toggled.
+  include_pitch_bends: bool = False
 
   @property
   def abbrev_str(self):
@@ -61,6 +67,8 @@ class VocabularyConfig:
       s += 'vb%d' % self.num_velocity_bins
     if not self.include_rhythm:
       s += 'nr'
+    if self.include_pitch_bends:
+      s += 'pb12'
     return s
 
 
@@ -162,6 +170,17 @@ def build_codec(vocab_config: VocabularyConfig):
     # subsequent pitch event until changed. 0 = not rhythm, 1 = rhythm.
     # Deliberately LAST, so omitting it shifts no other event's ids.
     event_ranges.append(event_codec.EventRange('rhythm', 0, 1))
+  elif vocab_config.include_pitch_bends:
+    # Once another range follows rhythm, omitting rhythm would shift that
+    # range's ids between rhythm-aware and rhythm-free checkpoints. Reserve
+    # the same two physical ids while keeping has_event_type('rhythm') false.
+    event_ranges.append(event_codec.EventRange(
+        _RESERVED_RHYTHM_EVENT_TYPE, 0, 1))
+
+  if vocab_config.include_pitch_bends:
+    event_ranges.append(event_codec.EventRange(
+        'pitch_bend', -PITCH_BEND_RANGE_SEMITONES,
+        PITCH_BEND_RANGE_SEMITONES))
 
   return event_codec.Codec(
       max_shift_steps=(vocab_config.steps_per_second *

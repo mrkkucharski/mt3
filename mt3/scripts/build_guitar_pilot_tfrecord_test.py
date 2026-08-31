@@ -67,7 +67,7 @@ def _write_midi(path: Path) -> None:
   midi_file.save(str(path))
 
 
-def _write_fixture(dataset_dir: Path) -> None:
+def _write_fixture(dataset_dir: Path, include_pitch_bends: bool = False) -> None:
   _write_wav(dataset_dir / 'audio/train/ex_0001.wav')
   _write_midi(dataset_dir / 'midi/train/ex_0001.mid')
 
@@ -101,6 +101,24 @@ def _write_fixture(dataset_dir: Path) -> None:
       'render_seed': 1,
       'normalization': 'peak:-1dBFS',
   }
+  if include_pitch_bends:
+    rpp = dataset_dir / 'source.RPP'
+    rpp.write_text(
+        '<TRACK\n'
+        '  NAME "distortion-guitar:rhythm"\n'
+        '  <ITEM\n'
+        '    POSITION 0\n'
+        '    <SOURCE MIDI\n'
+        '      HASDATA 1 480 QN\n'
+        '      E 0 b0 65 00\n'
+        '      E 0 b0 64 00\n'
+        '      E 0 b0 06 0c\n'
+        '      E 0 e0 00 60\n'
+        '      E 480 e0 00 40\n'
+        '    >\n'
+        '  >\n'
+        '>\n')
+    record['source_project'] = str(rpp)
   (dataset_dir / 'manifest.jsonl').write_text(json.dumps(record) + '\n')
 
 
@@ -139,3 +157,19 @@ def test_build_dataset_rejects_manifest_midi_mismatch():
 
     with pytest.raises(ValueError, match='do not match'):
       build_tfrecord.build_dataset(dataset_dir, dataset_dir / 'tfrecord')
+
+
+def test_build_dataset_adds_pitch_bends_from_source_rpp():
+  with tempfile.TemporaryDirectory() as directory:
+    dataset_dir = Path(directory) / 'dataset'
+    _write_fixture(dataset_dir, include_pitch_bends=True)
+    outputs = build_tfrecord.build_dataset(dataset_dir, dataset_dir / 'tfrecord')
+    serialized = next(tf.compat.v1.io.tf_record_iterator(str(outputs['train'])))
+
+  example = tf.train.Example.FromString(serialized)
+  sequence = note_seq.NoteSequence.FromString(
+      example.features.feature['sequence'].bytes_list.value[0])
+  assert [bend.bend for bend in sequence.pitch_bends] == [4096, 0]
+  assert sequence.pitch_bends[0].instrument == sequence.notes[0].instrument
+  assert sequence.pitch_bends[0].program == 30
+  assert sequence.pitch_bends[1].time == pytest.approx(0.46875)

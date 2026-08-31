@@ -131,13 +131,22 @@ def _ensure_cuda_library_path() -> None:
   os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_dirs + ([existing] if existing else []))
 
 
-def _t5x_probe_command(checkpoint_path: str, probe_model_dir: str) -> list[str]:
-  return [
-      'python', '-m', 't5x.train',
-      '--gin_search_paths=/workspace/mt3',
+def _t5x_probe_command(checkpoint_path: str, probe_model_dir: str,
+                       include_rhythm: bool = False,
+                       pitch_bends: bool = False) -> list[str]:
+  gin_files = [
       '--gin_file=mt3/gin/model.gin',
       '--gin_file=mt3/gin/train.gin',
       '--gin_file=mt3/gin/guitar_pilot_finetune_modal.gin',
+  ]
+  if not include_rhythm:
+    gin_files.append('--gin_file=mt3/gin/no_rhythm.gin')
+  if pitch_bends:
+    gin_files.append('--gin_file=mt3/gin/pitch_bends.gin')
+  return [
+      'python', '-m', 't5x.train',
+      '--gin_search_paths=/workspace/mt3',
+      *gin_files,
       # subprocess.run receives this as a list, so there is no shell to strip
       # a layer of quoting -- each argv element is passed to t5x.train's
       # flag parser exactly as written here. Gin parses override values via
@@ -157,7 +166,9 @@ def _t5x_probe_command(checkpoint_path: str, probe_model_dir: str) -> list[str]:
 
 
 @app.function(image=image, gpu='A10G', timeout=30 * 60, volumes=VOLUMES)
-def run_eval(checkpoint_path: str, probe_model_dir: str) -> None:
+def run_eval(checkpoint_path: str, probe_model_dir: str,
+             include_rhythm: bool = False,
+             pitch_bends: bool = False) -> None:
   """Resumes `checkpoint_path` (relative to the runs volume root) into the
   disposable `probe_model_dir` (also relative to the runs volume root) for
   one step, to trigger its infer_eval against the eval task's current
@@ -169,11 +180,17 @@ def run_eval(checkpoint_path: str, probe_model_dir: str) -> None:
   _ensure_cuda_library_path()
 
   result = subprocess.run(
-      _t5x_probe_command(checkpoint_path, probe_model_dir), cwd='/workspace/mt3')
+      _t5x_probe_command(
+          checkpoint_path, probe_model_dir, include_rhythm, pitch_bends),
+      cwd='/workspace/mt3')
   runs_volume.commit()
   result.check_returncode()
 
 
 @app.local_entrypoint()
-def main(checkpoint_path: str, probe_model_dir: str) -> None:
-  run_eval.remote(checkpoint_path=checkpoint_path, probe_model_dir=probe_model_dir)
+def main(checkpoint_path: str, probe_model_dir: str,
+         include_rhythm: bool = False,
+         pitch_bends: bool = False) -> None:
+  run_eval.remote(
+      checkpoint_path=checkpoint_path, probe_model_dir=probe_model_dir,
+      include_rhythm=include_rhythm, pitch_bends=pitch_bends)

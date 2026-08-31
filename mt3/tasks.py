@@ -264,6 +264,11 @@ VOCAB_CONFIG_NOVELOCITY = vocabularies.VocabularyConfig(num_velocity_bins=1)
 # their own names (see construct_task_name).
 VOCAB_CONFIG_NOVELOCITY_NORHYTHM = vocabularies.VocabularyConfig(
     num_velocity_bins=1, include_rhythm=False)
+VOCAB_CONFIG_NOVELOCITY_PITCH_BENDS = vocabularies.VocabularyConfig(
+    num_velocity_bins=1, include_pitch_bends=True)
+VOCAB_CONFIG_NOVELOCITY_NORHYTHM_PITCH_BENDS = (
+    vocabularies.VocabularyConfig(
+        num_velocity_bins=1, include_rhythm=False, include_pitch_bends=True))
 
 # Transcribe MAESTRO v1.
 add_transcription_task_to_registry(
@@ -317,6 +322,31 @@ add_transcription_task_to_registry(
     dataset_config=datasets.GUITAR_PILOT_CONFIG,
     spectrogram_config=SPECTROGRAM_CONFIG,
     vocab_config=VOCAB_CONFIG_NOVELOCITY,
+    tokenize_fn=functools.partial(
+        preprocessors.tokenize_transcription_example,
+        audio_is_samples=False,
+        id_feature_key='id'),
+    onsets_only=False,
+    include_ties=True)
+
+# Bend-aware variants use the same TFRecords. The tokenizer reads pitch bends
+# already present in each serialized NoteSequence and maps the fixed MIDI
+# +/-12 range to one integer-semitone token per wheel state change.
+add_transcription_task_to_registry(
+    dataset_config=datasets.GUITAR_PILOT_CONFIG,
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY_PITCH_BENDS,
+    tokenize_fn=functools.partial(
+        preprocessors.tokenize_transcription_example,
+        audio_is_samples=False,
+        id_feature_key='id'),
+    onsets_only=False,
+    include_ties=True)
+
+add_transcription_task_to_registry(
+    dataset_config=datasets.GUITAR_PILOT_CONFIG,
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM_PITCH_BENDS,
     tokenize_fn=functools.partial(
         preprocessors.tokenize_transcription_example,
         audio_is_samples=False,

@@ -59,7 +59,8 @@ def _load_split_records(dataset_dir: Path, split: str) -> list[dict]:
 
 
 def evaluate(checkpoint_path: Path, dataset_dir: Path, split: str,
-             rhythm_vocab: bool = False) -> dict:
+             rhythm_vocab: bool = False,
+             pitch_bend_vocab: bool = False) -> dict:
   """Transcribes every `split` example and scores it against its corpus MIDI.
 
   Rhythm-free evaluation is the default. Pass `rhythm_vocab=True` only for a
@@ -75,7 +76,10 @@ def evaluate(checkpoint_path: Path, dataset_dir: Path, split: str,
   if not records:
     raise ValueError(f"no {split!r} examples in {dataset_dir / 'manifest.jsonl'}")
 
-  transcriber = Transcriber(checkpoint_path, rhythm_vocab=rhythm_vocab)
+  transcriber_kwargs = {'rhythm_vocab': rhythm_vocab}
+  if pitch_bend_vocab:
+    transcriber_kwargs['pitch_bend_vocab'] = True
+  transcriber = Transcriber(checkpoint_path, **transcriber_kwargs)
   per_example = []
   for record in records:
     audio_path = dataset_dir / record["audio_path"]
@@ -92,6 +96,8 @@ def evaluate(checkpoint_path: Path, dataset_dir: Path, split: str,
         "source_midi_id": record["source_midi_id"],
         "ref_notes": len(ref_ns.notes),
         "est_notes": len(est_ns.notes),
+        "ref_pitch_bends": len(ref_ns.pitch_bends),
+        "est_pitch_bends": len(est_ns.pitch_bends),
         "f1": scores[F1_KEY],
         "precision": scores[PRECISION_KEY],
         "recall": scores[RECALL_KEY],
@@ -107,6 +113,7 @@ def evaluate(checkpoint_path: Path, dataset_dir: Path, split: str,
       "split": split,
       "example_count": len(per_example),
       "mean_f1": mean_f1,
+      "pitch_bend_vocab": pitch_bend_vocab,
       "examples": per_example,
   }
 
@@ -122,11 +129,16 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--include-rhythm-vocab", action="store_true",
                       help="The checkpoint was trained with the optional "
                            "rhythm/lead flag; score by (program, rhythm).")
+  parser.add_argument("--pitch-bends", action="store_true",
+                      help="The checkpoint uses the fixed +/-12 pitch-bend "
+                           "vocabulary. Bend counts are reported; the existing "
+                           "F1 remains note-only.")
   args = parser.parse_args(argv)
 
   result = evaluate(
       args.checkpoint.expanduser().resolve(), args.dataset.expanduser().resolve(),
-      args.split, rhythm_vocab=args.include_rhythm_vocab)
+      args.split, rhythm_vocab=args.include_rhythm_vocab,
+      pitch_bend_vocab=args.pitch_bends)
   scored_by = "(program, rhythm)" if args.include_rhythm_vocab else "program"
   print(f"\n{result['example_count']} {args.split} example(s), "
         f"mean {scored_by} onset+offset F1 = {result['mean_f1']:.3f}")

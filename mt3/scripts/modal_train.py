@@ -188,7 +188,8 @@ def _t5x_train_command(train_steps: int,
                        save_period: int,
                        context_4s: bool = False,
                        model_dir: str | None = None,
-                       include_rhythm: bool = False) -> list[str]:
+                       include_rhythm: bool = False,
+                       pitch_bends: bool = False) -> list[str]:
   """Builds the t5x.train argv.
 
   `context_4s` appends gin/context_4s.gin, which rebinds TASK_FEATURE_LENGTHS
@@ -220,6 +221,8 @@ def _t5x_train_command(train_steps: int,
   overrides = []
   if not include_rhythm:
     gin_files.append('--gin_file=mt3/gin/no_rhythm.gin')
+  if pitch_bends:
+    gin_files.append('--gin_file=mt3/gin/pitch_bends.gin')
   if context_4s:
     gin_files.append('--gin_file=mt3/gin/context_4s.gin')
     overrides.append(
@@ -261,7 +264,8 @@ def run_training(train_steps: int = 1,
                  save_period: int = 25,
                  context_4s: bool = False,
                  model_dir: str | None = None,
-                 include_rhythm: bool = False) -> None:
+                 include_rhythm: bool = False,
+                 pitch_bends: bool = False) -> None:
   """Runs one t5x.train invocation and commits the run-artifacts volume.
 
   `train_steps` is relative to wherever the restored checkpoint currently
@@ -280,7 +284,7 @@ def run_training(train_steps: int = 1,
   _ensure_cuda_library_path()
 
   command = _t5x_train_command(train_steps, save_period, context_4s, model_dir,
-                               include_rhythm)
+                               include_rhythm, pitch_bends)
   print('t5x command:', ' '.join(command), flush=True)
   result = subprocess.run(command, cwd='/workspace/mt3')
   runs_volume.commit()
@@ -317,11 +321,13 @@ def main(train_steps: int = 1,
          save_period: int = 25,
          context_4s: bool = False,
          model_dir: str | None = None,
-         include_rhythm: bool = False) -> None:
+         include_rhythm: bool = False,
+         pitch_bends: bool = False) -> None:
   # .spawn(), not .remote(): .remote() blocks the local process on an open
   # connection for the whole run, so a local disconnect kills the remote job
   # even with `modal run --detach` (PROJECT_LOG.md, 2026-08-09, "modal_train.py
   # switched from a blocking .remote() call to .spawn()").
   run_training.spawn(train_steps=train_steps, save_period=save_period,
                      context_4s=context_4s, model_dir=model_dir,
-                     include_rhythm=include_rhythm)
+                     include_rhythm=include_rhythm,
+                     pitch_bends=pitch_bends)

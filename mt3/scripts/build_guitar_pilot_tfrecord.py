@@ -35,12 +35,166 @@ import argparse
 import collections
 import json
 from pathlib import Path
+import re
 import sys
 
+import mido
 import note_seq
 import tensorflow as tf
 
 from mt3 import note_sequences
+
+
+_RPP_EVENT = re.compile(
+    r'^[Ee]\s+(\d+)\s+([0-9a-fA-F]{2})\s+'
+    r'([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})$')
+
+
+def _tick_to_seconds_fn(midi_path: Path):
+  """Return (ticks_per_beat, absolute-tick to seconds) from corpus MIDI."""
+  midi = mido.MidiFile(midi_path)
+  tempo_events = [(0, 500_000)]
+  for track in midi.tracks:
+    tick = 0
+    for message in track:
+      tick += message.time
+      if message.type == 'set_tempo':
+        tempo_events.append((tick, message.tempo))
+  tempo_events.sort(key=lambda event: event[0])
+
+  def tick_to_seconds(target_tick: int) -> float:
+    seconds = 0.0
+    previous_tick = 0
+    tempo = 500_000
+    for tick, next_tempo in tempo_events:
+      if tick > target_tick:
+        break
+      seconds += mido.tick2second(
+          tick - previous_tick, midi.ticks_per_beat, tempo)
+      previous_tick = tick
+      tempo = next_tempo
+    return seconds + mido.tick2second(
+        target_tick - previous_tick, midi.ticks_per_beat, tempo)
+
+  return midi.ticks_per_beat, tick_to_seconds
+
+
+def _read_rpp_pitch_bends(rpp_path: Path) -> tuple[int, list[tuple[str, int, int]]]:
+  """Read (track name, absolute tick, raw wheel value) from an RPP.
+
+  The pilot projects contain one project-length MIDI item per corpus track,
+  all at POSITION 0. The converted slide gestures explicitly declare RPN 0,0
+  as +/-12 semitones before their wheel messages; reject any other layout or
+  range instead of silently assigning the wrong token meaning.
+  """
+  lines = rpp_path.read_text(encoding='utf-8', errors='replace').splitlines()
+  track_name = None
+  item_position = None
+  tick = 0
+  ppq = None
+  active_source = False
+  rpn_msb = {}
+  rpn_lsb = {}
+  bend_range = {}
+  bends = []
+
+  for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('<TRACK'):
+      track_name = None
+      item_position = None
+      active_source = False
+    elif track_name is None and stripped.startswith('NAME '):
+      name = stripped[5:].strip()
+      track_name = (name[1:-1] if len(name) >= 2 and
+                    name[0] == name[-1] and name[0] in '"\'`' else name)
+    elif stripped.startswith('POSITION '):
+      item_position = float(stripped.split()[1])
+    elif stripped.startswith('HASDATA '):
+      bits = stripped.split()
+      if len(bits) < 3 or not bits[2].isdigit():
+        raise ValueError(f'{rpp_path}: malformed MIDI HASDATA line: {stripped}')
+      source_ppq = int(bits[2])
+      if ppq is None:
+        ppq = source_ppq
+      elif ppq != source_ppq:
+        raise ValueError(f'{rpp_path}: mixed MIDI PPQ values {ppq} and {source_ppq}')
+      if item_position not in (None, 0.0):
+        raise ValueError(
+            f'{rpp_path}: pitch-bend import requires POSITION 0 MIDI items; '
+            f'found {item_position}')
+      tick = 0
+      active_source = True
+      rpn_msb.clear()
+      rpn_lsb.clear()
+      bend_range.clear()
+    elif active_source:
+      match = _RPP_EVENT.match(stripped)
+      if not match:
+        continue
+      delta, status_hex, d1_hex, d2_hex = match.groups()
+      tick += int(delta)
+      status = int(status_hex, 16)
+      data1 = int(d1_hex, 16)
+      data2 = int(d2_hex, 16)
+      kind = status & 0xF0
+      channel = status & 0x0F
+      if kind == 0xB0:
+        if data1 == 101:
+          rpn_msb[channel] = data2
+        elif data1 == 100:
+          rpn_lsb[channel] = data2
+        elif (data1 == 6 and rpn_msb.get(channel) == 0 and
+              rpn_lsb.get(channel) == 0):
+          bend_range[channel] = data2
+      elif kind == 0xE0:
+        if bend_range.get(channel) != 12:
+          raise ValueError(
+              f'{rpp_path}: pitch wheel at tick {tick} on {track_name!r} '
+              'without an active +/-12-semitone RPN declaration')
+        bends.append((track_name or '', tick, (data2 << 7 | data1) - 8192))
+
+  return ppq or 0, bends
+
+
+def _add_source_project_pitch_bends(
+    ns: note_seq.NoteSequence, midi_path: Path, manifest_record: dict
+) -> None:
+  """Add bend labels from the source RPP that legacy corpus MIDI omitted."""
+  source_project = manifest_record.get('source_project')
+  if not source_project:
+    return
+  rpp_path = Path(source_project)
+  if not rpp_path.is_file():
+    raise FileNotFoundError(f'{manifest_record["id"]}: missing {rpp_path}')
+  rpp_ppq, bends = _read_rpp_pitch_bends(rpp_path)
+  if not bends:
+    return
+  midi_ppq, tick_to_seconds = _tick_to_seconds_fn(midi_path)
+  if rpp_ppq != midi_ppq:
+    raise ValueError(
+        f'{manifest_record["id"]}: RPP PPQ {rpp_ppq} != MIDI PPQ {midi_ppq}')
+
+  info_instruments = {info.name: info.instrument for info in ns.instrument_infos}
+  source_to_canonical = {
+      part.get('reaper_track_name', part['track_name']): part['track_name']
+      for part in manifest_record['parts']
+  }
+  programs = {}
+  for note in ns.notes:
+    programs.setdefault(note.instrument, note.program)
+  for track_name, tick, bend in bends:
+    canonical_name = source_to_canonical.get(track_name, track_name)
+    instrument = info_instruments.get(canonical_name)
+    if instrument is None:
+      raise ValueError(
+          f'{manifest_record["id"]}: bend track {track_name!r} is absent '
+          'from corpus MIDI instrument_infos')
+    ns.pitch_bends.add(
+        time=tick_to_seconds(tick), bend=bend, instrument=instrument,
+        program=programs[instrument], is_drum=False)
+  ns.total_time = max(ns.total_time,
+                      max(bend.time for bend in ns.pitch_bends))
 
 
 def _load_records(dataset_dir: Path) -> list[dict]:
@@ -79,6 +233,7 @@ def midi_to_note_sequence(
   ns = note_seq.midi_file_to_note_sequence(str(midi_path))
   ns.id = example_id
   ns.filename = audio_path
+  _add_source_project_pitch_bends(ns, midi_path, manifest_record)
 
   manifest_key = _manifest_parts_key(manifest_record)
   midi_key = _note_sequence_parts_key(ns)

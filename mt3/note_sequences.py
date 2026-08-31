@@ -97,6 +97,7 @@ def trim_overlapping_notes(ns: note_seq.NoteSequence) -> note_seq.NoteSequence:
 def assign_instruments(
     ns: note_seq.NoteSequence,
     note_rhythms: Optional[Sequence[bool]] = None,
+    pitch_bend_rhythms: Optional[Sequence[bool]] = None,
 ) -> None:
   """Assign instrument numbers to notes; modifies NoteSequence in place.
 
@@ -115,6 +116,11 @@ def assign_instruments(
     raise ValueError(
         'note_rhythms must have exactly one entry per note in ns.notes: '
         f'got {len(note_rhythms)} for {len(ns.notes)} notes')
+  if (pitch_bend_rhythms is not None and
+      len(pitch_bend_rhythms) != len(ns.pitch_bends)):
+    raise ValueError(
+        'pitch_bend_rhythms must have exactly one entry per pitch bend: '
+        f'got {len(pitch_bend_rhythms)} for {len(ns.pitch_bends)} bends')
 
   del ns.instrument_infos[:]
   key_instruments: MutableMapping[Tuple[int, bool], int] = {}
@@ -141,6 +147,25 @@ def assign_instruments(
           name=general_midi.instrument_name(
               program=note.program, is_drum=False, rhythm=rhythm))
     note.instrument = key_instruments[key]
+
+  # Pitch bends share the channel/instrument selected by their program and
+  # rhythm state. A bend for a track with no decoded note is meaningless and
+  # cannot be assigned to a MIDI instrument, so discard it.
+  kept_bends = []
+  for i, bend in enumerate(ns.pitch_bends):
+    if bend.is_drum:
+      continue
+    rhythm = (bool(pitch_bend_rhythms[i])
+              if pitch_bend_rhythms is not None else False)
+    instrument = key_instruments.get((bend.program, rhythm))
+    if instrument is None:
+      continue
+    kept_bends.append((bend.time, bend.bend, bend.program, instrument))
+  del ns.pitch_bends[:]
+  for time, bend, program, instrument in kept_bends:
+    ns.pitch_bends.add(
+        time=time, bend=bend, program=program, instrument=instrument,
+        is_drum=False)
 
 
 def validate_note_sequence(ns: note_seq.NoteSequence) -> None:
@@ -203,6 +228,33 @@ class NoteEventData:
   rhythm: Optional[bool] = None
 
 
+@dataclasses.dataclass
+class PitchBendEventData:
+  """A channel-wide pitch bend, normalized to an integer semitone offset."""
+  bend: int
+  program: int
+  instrument: int
+  rhythm: bool = False
+
+
+def midi_pitch_bend_to_semitones(bend: int) -> int:
+  """Quantize a raw MIDI wheel value to the fixed [-12, 12] contract."""
+  if not -8192 <= bend <= 8191:
+    raise ValueError(f'MIDI pitch bend out of range: {bend}')
+  denominator = 8191 if bend >= 0 else 8192
+  return int(round(
+      bend * vocabularies.PITCH_BEND_RANGE_SEMITONES / denominator))
+
+
+def semitones_to_midi_pitch_bend(semitones: int) -> int:
+  """Convert the fixed integer-semitone contract to a raw MIDI wheel value."""
+  limit = vocabularies.PITCH_BEND_RANGE_SEMITONES
+  if not -limit <= semitones <= limit:
+    raise ValueError(f'pitch bend semitones out of range: {semitones}')
+  scale = 8191 if semitones >= 0 else 8192
+  return int(round(semitones * scale / limit))
+
+
 def note_sequence_to_onsets(
     ns: note_seq.NoteSequence
 ) -> Tuple[Sequence[float], Sequence[NoteEventData]]:
@@ -254,7 +306,8 @@ def instrument_rhythms(
 def note_sequence_to_onsets_and_offsets_and_programs(
     ns: note_seq.NoteSequence,
     include_rhythm: bool = True,
-) -> Tuple[Sequence[float], Sequence[NoteEventData]]:
+    include_pitch_bends: bool = False,
+) -> Tuple[Sequence[float], Sequence[NoteEventData | PitchBendEventData]]:
   """Extract onset & offset times and pitches & programs from a NoteSequence.
 
   The onset & offset times will not necessarily be in sorted order.
@@ -297,12 +350,38 @@ def note_sequence_to_onsets_and_offsets_and_programs(
   notes = sorted(ns.notes,
                  key=lambda note: (note.is_drum, note.program, rhythm(note),
                                    note.pitch))
-  times = ([note.end_time for note in notes if not note.is_drum] +
+  bend_times = []
+  bend_values = []
+  if include_pitch_bends:
+    # Quantize first and retain only actual state changes per source
+    # instrument. At equal times bends are inserted between note-offs and
+    # note-ons by the concatenation order below.
+    current_bends = {}
+    bends = sorted(
+        (bend for bend in ns.pitch_bends if not bend.is_drum),
+        key=lambda bend: (bend.time, bend.program,
+                          rhythm_by_instrument.get(bend.instrument, False),
+                          bend.instrument))
+    for bend in bends:
+      bend_rhythm = (rhythm_by_instrument.get(bend.instrument, False)
+                     if include_rhythm else False)
+      key = (bend.instrument, bend.program, bend_rhythm)
+      semitones = midi_pitch_bend_to_semitones(bend.bend)
+      if current_bends.get(key, 0) == semitones:
+        continue
+      current_bends[key] = semitones
+      bend_times.append(bend.time)
+      bend_values.append(PitchBendEventData(
+          bend=semitones, program=bend.program,
+          instrument=bend.instrument, rhythm=bend_rhythm))
+
+  times = ([note.end_time for note in notes if not note.is_drum] + bend_times +
            [note.start_time for note in notes])
   values = ([NoteEventData(pitch=note.pitch, velocity=0,
                            program=note.program, is_drum=False,
                            rhythm=rhythm(note))
              for note in notes if not note.is_drum] +
+            bend_values +
             [NoteEventData(pitch=note.pitch, velocity=note.velocity,
                            program=note.program, is_drum=note.is_drum,
                            rhythm=False if note.is_drum else rhythm(note))
@@ -316,14 +395,29 @@ class NoteEncodingState:
   # velocity bin for active (pitch, program, rhythm)
   active_pitches: MutableMapping[Tuple[int, int, bool], int] = (
       dataclasses.field(default_factory=dict))
+  # current quantized bend for each (program, rhythm) track
+  current_bends: MutableMapping[Tuple[int, bool], int] = (
+      dataclasses.field(default_factory=dict))
 
 
 def note_event_data_to_events(
     state: Optional[NoteEncodingState],
-    value: NoteEventData,
+    value: NoteEventData | PitchBendEventData,
     codec: event_codec.Codec,
 ) -> Sequence[event_codec.Event]:
   """Convert note event data to a sequence of events."""
+  if isinstance(value, PitchBendEventData):
+    if not codec.has_event_type('pitch_bend'):
+      return []
+    include_rhythm = codec.has_event_type('rhythm')
+    rhythm = bool(value.rhythm) and include_rhythm
+    if state is not None:
+      state.current_bends[(int(value.program), rhythm)] = value.bend
+    events = [event_codec.Event('program', value.program)]
+    if include_rhythm:
+      events.append(event_codec.Event('rhythm', int(rhythm)))
+    events.append(event_codec.Event('pitch_bend', value.bend))
+    return events
   if value.velocity is None:
     # onsets only, no program or velocity
     return [event_codec.Event('pitch', value.pitch)]
@@ -371,6 +465,13 @@ def note_encoding_state_to_events(
   """
   include_rhythm = codec.has_event_type('rhythm')
   events = []
+  if codec.has_event_type('pitch_bend'):
+    for (program, rhythm), bend in sorted(state.current_bends.items()):
+      if bend:
+        events.append(event_codec.Event('program', program))
+        if include_rhythm:
+          events.append(event_codec.Event('rhythm', int(rhythm)))
+        events.append(event_codec.Event('pitch_bend', bend))
   for pitch, program, rhythm in sorted(
       state.active_pitches.keys(), key=lambda k: (k[1], k[2], k[0])):
     if state.active_pitches[(pitch, program, rhythm)]:
@@ -422,6 +523,9 @@ class NoteDecodingState:
   # pitches (with programs and rhythm flags) to continue from previous segment
   tied_pitches: MutableSet[Tuple[int, int, bool]] = dataclasses.field(
       default_factory=set)
+  # (program, rhythm) bend states declared in the current tie section
+  tied_bends: MutableSet[Tuple[int, bool]] = dataclasses.field(
+      default_factory=set)
   # whether or not we are in the tie section at the beginning of a segment
   is_tie_section: bool = False
   # set externally, per event, by run_length_encoding.decode_events when it
@@ -451,6 +555,11 @@ class NoteDecodingState:
   # rhythm flag for each note added to `note_sequence`, in order; the carrier
   # `assign_instruments` needs since notes added here have no rhythm field
   note_rhythms: List[bool] = dataclasses.field(default_factory=list)
+  # current quantized bend for each decoded (program, rhythm) track
+  current_bends: MutableMapping[Tuple[int, bool], int] = (
+      dataclasses.field(default_factory=dict))
+  # rhythm carrier parallel to note_sequence.pitch_bends
+  pitch_bend_rhythms: List[bool] = dataclasses.field(default_factory=list)
 
   def begin_suppressed_prefix(self, start_time: float) -> None:
     begin_suppressed_prefix(self, start_time)
@@ -496,6 +605,17 @@ def _add_note_to_sequence(
   state.note_sequence.total_time = max(state.note_sequence.total_time,
                                        end_time)
   state.note_rhythms.append(rhythm)
+
+
+def _add_pitch_bend_to_sequence(
+    state: NoteDecodingState, time: float, bend: int,
+    program: int, rhythm: bool
+) -> None:
+  state.note_sequence.pitch_bends.add(
+      time=time, bend=semitones_to_midi_pitch_bend(bend),
+      program=program, is_drum=False)
+  state.note_sequence.total_time = max(state.note_sequence.total_time, time)
+  state.pitch_bend_rhythms.append(rhythm)
 
 
 def decode_note_event(
@@ -606,6 +726,15 @@ def decode_note_event(
     # collapses to one (program, rhythm) group rather than two.
     if not state.no_rhythm:
       state.current_rhythm = bool(event.value)
+  elif event.type == 'pitch_bend':
+    key = (state.current_program, state.current_rhythm)
+    if state.is_tie_section:
+      state.tied_bends.add(key)
+    if state.current_bends.get(key, 0) != event.value:
+      state.current_bends[key] = event.value
+      _add_pitch_bend_to_sequence(
+          state, time=time, bend=event.value,
+          program=state.current_program, rhythm=state.current_rhythm)
   elif event.type == 'tie':
     if state.suppress:
       # The tie section describes what's sounding at the window's first
@@ -619,6 +748,15 @@ def decode_note_event(
     # end of tie section; end active notes that weren't declared tied
     if not state.is_tie_section:
       raise ValueError('tie section end event when not in tie section')
+    # Nonzero bend state is listed before the tie token just like active
+    # pitches. An omitted track is centered in this segment, so explicitly
+    # close any bend carried from the preceding window.
+    for (program, rhythm), bend in list(state.current_bends.items()):
+      if bend and (program, rhythm) not in state.tied_bends:
+        _add_pitch_bend_to_sequence(
+            state, time=state.current_time, bend=0,
+            program=program, rhythm=rhythm)
+        state.current_bends.pop((program, rhythm))
     for (pitch, program, rhythm) in list(state.active_pitches.keys()):
       if (pitch, program, rhythm) not in state.tied_pitches:
         onset_time, onset_velocity = state.active_pitches.pop(
@@ -636,6 +774,7 @@ def decode_note_event(
 def begin_tied_pitches_section(state: NoteDecodingState) -> None:
   """Begin the tied pitches section at the start of a segment."""
   state.tied_pitches = set()
+  state.tied_bends = set()
   state.is_tie_section = True
 
 
@@ -652,6 +791,7 @@ def begin_suppressed_prefix(state: NoteDecodingState,
   state.prefix_state = NoteDecodingState(
       current_time=start_time,
       active_pitches=dict(state.active_pitches),
+      current_bends=dict(state.current_bends),
       is_tie_section=state.is_tie_section,
       is_prefix_shadow=True,
       force_program=state.force_program,
@@ -692,6 +832,18 @@ def finish_suppressed_prefix(state: NoteDecodingState,
   state.current_velocity = prefix_state.current_velocity
   state.current_program = prefix_state.current_program
   state.current_rhythm = prefix_state.current_rhythm
+  for key in set(state.current_bends) | set(prefix_state.current_bends):
+    committed_bend = state.current_bends.get(key, 0)
+    prefix_bend = prefix_state.current_bends.get(key, 0)
+    if committed_bend != prefix_bend:
+      program, rhythm = key
+      _add_pitch_bend_to_sequence(
+          state, time=boundary_time, bend=prefix_bend,
+          program=program, rhythm=rhythm)
+      if prefix_bend:
+        state.current_bends[key] = prefix_bend
+      else:
+        state.current_bends.pop(key, None)
   state.current_time = max(state.current_time, boundary_time)
   state.tied_pitches = set()
   state.is_tie_section = False
@@ -716,7 +868,14 @@ def flush_note_decoding_state(
     _add_note_to_sequence(
         state, start_time=onset_time, end_time=state.current_time,
         pitch=pitch, velocity=onset_velocity, program=program, rhythm=rhythm)
-  assign_instruments(state.note_sequence, note_rhythms=state.note_rhythms)
+  for (program, rhythm), bend in sorted(state.current_bends.items()):
+    if bend:
+      _add_pitch_bend_to_sequence(
+          state, time=state.current_time, bend=0,
+          program=program, rhythm=rhythm)
+  assign_instruments(
+      state.note_sequence, note_rhythms=state.note_rhythms,
+      pitch_bend_rhythms=state.pitch_bend_rhythms)
   return state.note_sequence
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import gin
 import jax
+import mido
 import numpy as np
 import seqio
 
@@ -141,6 +142,9 @@ class TranscriptionResult:
   # gin/no_rhythm.gin and cannot emit rhythm tokens in the first place --
   # a different thing from decoding a rhythm-aware model with no_rhythm.
   rhythm_vocab: bool = True
+  # whether the checkpoint vocabulary includes the fixed +/-12 bend range
+  pitch_bend_vocab: bool = False
+  pitch_bend_count: int = 0
 
   def as_dict(self) -> dict[str, object]:
     return {
@@ -160,14 +164,90 @@ class TranscriptionResult:
         'force_program': self.force_program,
         'no_rhythm': self.no_rhythm,
         'rhythm_vocab': self.rhythm_vocab,
+        'pitch_bend_vocab': self.pitch_bend_vocab,
+        'pitch_bend_count': self.pitch_bend_count,
     }
 
 
 def write_multitrack_midi(note_sequence: note_seq.NoteSequence,
                           output_path: Path) -> int:
-  """Writes all predicted MIDI programs and drum events to a standard MIDI file."""
+  """Write notes and bends with deterministic same-tick MIDI ordering.
+
+  Every melodic track containing bends declares RPN 0,0 = +/-12 semitones
+  before its first wheel message. At a shared tick the order is note-off,
+  pitch-wheel, note-on, so the new bend applies to the new attack without
+  retuning the note that just ended.
+  """
   output_path.parent.mkdir(parents=True, exist_ok=True)
-  note_seq.sequence_proto_to_midi_file(note_sequence, str(output_path))
+  if not note_sequence.pitch_bends:
+    # Preserve the legacy export path byte-for-behavior when the optional
+    # bend vocabulary is disabled or the model emitted no bends.
+    note_seq.sequence_proto_to_midi_file(note_sequence, str(output_path))
+    return len(note_sequence.notes)
+  ticks_per_beat = note_sequence.ticks_per_quarter or 220
+  midi = mido.MidiFile(type=1, ticks_per_beat=ticks_per_beat)
+  conductor = mido.MidiTrack()
+  conductor.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+  conductor.append(mido.MetaMessage('end_of_track', time=0))
+  midi.tracks.append(conductor)
+
+  info_names = {info.instrument: info.name
+                for info in note_sequence.instrument_infos}
+  instrument_ids = sorted(
+      {note.instrument for note in note_sequence.notes} |
+      {bend.instrument for bend in note_sequence.pitch_bends})
+  melodic_ids = [instrument for instrument in instrument_ids
+                 if not any(note.is_drum and note.instrument == instrument
+                            for note in note_sequence.notes)]
+  channels = [channel for channel in range(16) if channel != 9]
+  if len(melodic_ids) > len(channels):
+    raise ValueError('standard MIDI supports at most 15 melodic bend tracks')
+  channel_by_instrument = dict(zip(melodic_ids, channels))
+  seconds_to_ticks = ticks_per_beat * 2  # fixed 120 BPM
+
+  for instrument in instrument_ids:
+    notes = [note for note in note_sequence.notes
+             if note.instrument == instrument]
+    bends = [bend for bend in note_sequence.pitch_bends
+             if bend.instrument == instrument and not bend.is_drum]
+    is_drum = bool(notes and notes[0].is_drum)
+    channel = 9 if is_drum else channel_by_instrument[instrument]
+    program = next(
+        (event.program for event in [*notes, *bends] if not event.is_drum), 0)
+    track = mido.MidiTrack()
+    track.append(mido.MetaMessage(
+        'track_name', name=info_names.get(instrument, f'instrument-{instrument}'),
+        time=0))
+    if not is_drum:
+      track.append(mido.Message(
+          'program_change', channel=channel, program=program, time=0))
+    absolute_events = []
+    if bends:
+      # Pitch Bend Sensitivity: RPN MSB/LSB 0, data-entry MSB 12 semitones.
+      for order, control, value in (
+          (0, 101, 0), (1, 100, 0), (2, 6, 12), (3, 38, 0)):
+        absolute_events.append((0, order, mido.Message(
+            'control_change', channel=channel, control=control, value=value)))
+    for bend in bends:
+      absolute_events.append((
+          round(bend.time * seconds_to_ticks), 11,
+          mido.Message('pitchwheel', channel=channel, pitch=bend.bend)))
+    for note in notes:
+      start_tick = round(note.start_time * seconds_to_ticks)
+      end_tick = max(start_tick + 1, round(note.end_time * seconds_to_ticks))
+      absolute_events.append((end_tick, 10, mido.Message(
+          'note_off', channel=channel, note=note.pitch, velocity=0)))
+      absolute_events.append((start_tick, 12, mido.Message(
+          'note_on', channel=channel, note=note.pitch,
+          velocity=note.velocity)))
+    previous_tick = 0
+    for tick, _, message in sorted(absolute_events, key=lambda item: item[:2]):
+      message.time = tick - previous_tick
+      track.append(message)
+      previous_tick = tick
+    track.append(mido.MetaMessage('end_of_track', time=0))
+    midi.tracks.append(track)
+  midi.save(output_path)
   return len(note_sequence.notes)
 
 
@@ -369,7 +449,8 @@ class Transcriber:
                lookback_frames: int = 0,
                force_program: int | None = None,
                no_rhythm: bool = False,
-               rhythm_vocab: bool = False):
+               rhythm_vocab: bool = False,
+               pitch_bend_vocab: bool = False):
     self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not self.checkpoint_path.exists():
       raise FileNotFoundError(f'MT3 checkpoint does not exist: {self.checkpoint_path}')
@@ -389,6 +470,7 @@ class Transcriber:
     # vocabulary has no rhythm range implies it too, trivially: there are no
     # rhythm tokens for the model to emit.
     self.rhythm_vocab = rhythm_vocab
+    self.pitch_bend_vocab = pitch_bend_vocab
     self.no_rhythm = no_rhythm or force_program is not None or not rhythm_vocab
     self.batch_size = 1
     self.sequence_length = {'inputs': input_length, 'targets': target_length}
@@ -398,7 +480,8 @@ class Transcriber:
     self.spectrogram_config = spectrograms.SpectrogramConfig()
     self.codec = vocabularies.build_codec(
         vocabularies.VocabularyConfig(num_velocity_bins=1,
-                                      include_rhythm=rhythm_vocab))
+                                      include_rhythm=rhythm_vocab,
+                                      include_pitch_bends=pitch_bend_vocab))
     self.vocabulary = vocabularies.vocabulary_from_codec(self.codec)
     self.output_features = {
         'inputs': seqio.ContinuousFeature(dtype=tf.float32, rank=2),
@@ -438,6 +521,8 @@ class Transcriber:
         # Must agree with self.codec: model.gin builds its own codec from
         # these bindings to size the output vocabulary.
         f'vocabularies.VocabularyConfig.include_rhythm={self.rhythm_vocab}',
+        ('vocabularies.VocabularyConfig.include_pitch_bends='
+         f'{self.pitch_bend_vocab}'),
     ]
     with gin.unlock_config():
       gin.parse_config_files_and_bindings(
@@ -580,4 +665,6 @@ class Transcriber:
         cost_multiplier=window_frames / self.hop_frames,
         force_program=self.force_program,
         no_rhythm=self.no_rhythm,
-        rhythm_vocab=self.rhythm_vocab)
+        rhythm_vocab=self.rhythm_vocab,
+        pitch_bend_vocab=self.pitch_bend_vocab,
+        pitch_bend_count=len(sequence.pitch_bends))

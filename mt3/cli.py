@@ -82,6 +82,11 @@ def _parser() -> argparse.ArgumentParser:
            'checkpoint, not a decoding preference: omitting it for a '
            'rhythm-trained checkpoint turns its rhythm tokens into invalid '
            'events rather than merely ignoring them.')
+  parser.add_argument(
+      '--pitch-bends', action='store_true',
+      help='The checkpoint was trained with the fixed integer-semitone '
+           'pitch-bend vocabulary (-12 through +12). Rhythm token positions '
+           'remain reserved whether or not --include-rhythm-vocab is set.')
   return parser
 
 
@@ -114,6 +119,8 @@ def _resolve_transcriber_kwargs(args: argparse.Namespace) -> dict:
   # for legacy or deliberately rhythm-aware checkpoints.
   if args.include_rhythm_vocab:
     kwargs['rhythm_vocab'] = True
+  if args.pitch_bends:
+    kwargs['pitch_bend_vocab'] = True
   return kwargs
 
 
