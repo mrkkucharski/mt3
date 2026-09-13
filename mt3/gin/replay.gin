@@ -1,0 +1,5 @@
+# Select the 80% guitar-pilot / 20% original-MT3 replay mixture registered in
+# tasks.py. Load after guitar_pilot_finetune_modal.gin and no_rhythm.gin.
+# Replay is intentionally unavailable for rhythm-aware or pitch-bend codecs.
+
+TASK_PREFIX = 'guitar_pilot_replay_notes_ties'

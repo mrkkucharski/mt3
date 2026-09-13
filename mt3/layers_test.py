@@ -88,6 +88,41 @@ class SelfAttentionArgs:
     }
 
 
+class FixedEmbedTest(parameterized.TestCase):
+
+  def test_extended_positions_preserve_original_table(self):
+    positions = jnp.arange(4096)[None, :]
+    embedder = layers.FixedEmbed(features=512)
+    variables = embedder.init(random.PRNGKey(0), positions)
+    actual = np.asarray(jax.jit(embedder.apply)(variables, positions))
+    self.assertTrue(np.isfinite(actual).all())
+    original = np.asarray(layers.sinusoidal()(None, (2048, 512)))
+    self.assertEqual(actual[0, :2048].tobytes(), original.tobytes())
+    self.assertEmpty(variables)  # No new learned checkpoint parameters.
+
+  @parameterized.parameters(2047, 2048, 4095)
+  def test_autoregressive_positions_match_full_lookup(self, position):
+    embedder = layers.FixedEmbed(features=8)
+    inputs = jnp.zeros((1, 1), dtype=jnp.int32)
+    variables = {
+        'cache': {'position_embedder_index': jnp.array(position, jnp.uint32)}
+    }
+    actual, updated = jax.jit(
+        lambda state: embedder.apply(
+            state, inputs, decode=True, mutable=['cache']))(variables)
+    expected = embedder.apply({}, jnp.array([[position]]))
+    np.testing.assert_array_equal(actual, expected[0])
+    self.assertEqual(
+        int(updated['cache']['position_embedder_index']), position + 1)
+
+  @parameterized.parameters(False, True)
+  def test_oversized_sequence_rejected(self, decode):
+    embedder = layers.FixedEmbed(features=8)
+    with self.assertRaisesRegex(ValueError, 'exceeds FixedEmbed capacity 4096'):
+      embedder.init(
+          random.PRNGKey(0), jnp.arange(4097)[None, :], decode=decode)
+
+
 class AttentionTest(parameterized.TestCase):
 
   def test_dot_product_attention_shape(self):

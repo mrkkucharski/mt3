@@ -14,3 +14,9 @@
 #
 # Keep this in sync with pyproject.toml's [tool.uv.sources] flax rev.
 flax @ git+https://github.com/google/flax@c31deb2b8ec8d0cc1b2092aa81890823d21a4739
+
+# Same problem, same fix, for seqio (hit 2026-09-12): t5x also declares an
+# unpinned seqio URL, which conflicts with pyproject.toml's pinned rev during
+# the Modal image build ("Requirements contain conflicting URLs for package
+# `seqio`"). Keep in sync with pyproject.toml's [tool.uv.sources] seqio rev.
+seqio @ git+https://github.com/google/seqio@aaa0e111c5e9d8fb49bfa992f2272a121a95f741

@@ -15,6 +15,8 @@
 """Dataset configurations."""
 
 import dataclasses
+import os
+from pathlib import Path
 from typing import Mapping, Sequence, Union
 
 from mt3 import note_sequences
@@ -160,6 +162,61 @@ GUITAR_PILOT_CONFIG = DatasetConfig(
     infer_eval_splits=[
         InferEvalSplit(name='test', suffix='eval_test'),
     ])
+
+
+# Compact, local replay subsets of the six original MT3 datasets. On Modal the
+# data volume is mounted at /workspace/data; locally, training is run from the
+# mt3 checkout and the repository-level original/ directory is one level up.
+# MT3_REPLAY_ROOT remains available for an explicit staging location.
+_DEFAULT_REPLAY_ROOT = (
+    '/workspace/data/original'
+    if Path('/workspace/data/original').is_dir() else '../original')
+REPLAY_DATA_ROOT = os.environ.get('MT3_REPLAY_ROOT', _DEFAULT_REPLAY_ROOT)
+
+
+def _replay_config(name, features):
+  return DatasetConfig(
+      name=f'replay_{name}',
+      paths={
+          'train': f'{REPLAY_DATA_ROOT}/{name}/train.tfrecord',
+          'eval': f'{REPLAY_DATA_ROOT}/{name}/eval.tfrecord',
+      },
+      features=features,
+      train_split='train',
+      train_eval_split='eval',
+      infer_eval_splits=[InferEvalSplit(name='eval', suffix='eval')])
+
+
+_REPLAY_WAV_FEATURES = {
+    'audio': tf.io.FixedLenFeature([], dtype=tf.string),
+    'sequence': tf.io.FixedLenFeature([], dtype=tf.string),
+    'id': tf.io.FixedLenFeature([], dtype=tf.string),
+}
+_REPLAY_SAMPLE_FEATURES = {
+    **_REPLAY_WAV_FEATURES,
+    'audio': tf.io.FixedLenSequenceFeature(
+        [], dtype=tf.float32, allow_missing=True),
+    'sample_rate': tf.io.FixedLenFeature([], dtype=tf.float32),
+}
+_REPLAY_SLAKH_FEATURES = {
+    'audio_sample_rate': tf.io.FixedLenFeature([], dtype=tf.int64),
+    'inst_names': tf.io.FixedLenSequenceFeature(
+        [], dtype=tf.string, allow_missing=True),
+    'mix': tf.io.FixedLenSequenceFeature(
+        [], dtype=tf.float32, allow_missing=True),
+    'note_sequences': tf.io.FixedLenSequenceFeature(
+        [], dtype=tf.string, allow_missing=True),
+    'track_id': tf.io.FixedLenFeature([], dtype=tf.string),
+}
+
+REPLAY_MAESTROV3_CONFIG = _replay_config('maestrov3', _REPLAY_WAV_FEATURES)
+REPLAY_GUITARSET_CONFIG = _replay_config('guitarset', _REPLAY_WAV_FEATURES)
+REPLAY_URMP_CONFIG = _replay_config('urmp', _REPLAY_WAV_FEATURES)
+REPLAY_MUSICNET_EM_CONFIG = _replay_config(
+    'musicnet_em', _REPLAY_SAMPLE_FEATURES)
+REPLAY_CERBERUS4_CONFIG = _replay_config(
+    'cerberus4', _REPLAY_SLAKH_FEATURES)
+REPLAY_SLAKH_CONFIG = _replay_config('slakh', _REPLAY_SLAKH_FEATURES)
 
 
 URMP_CONFIG = DatasetConfig(

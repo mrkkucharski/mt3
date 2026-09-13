@@ -432,6 +432,92 @@ add_transcription_task_to_registry(
     include_ties=True)
 
 
+# Compact replay data is kept separate from data/pilot. These registrations
+# deliberately use the no-rhythm, no-pitch-bend codec selected by the current
+# fine-tuning recipe. WAV/sample datasets keep their serialized NoteSequence
+# programs verbatim. Slakh/Cerberus likewise merge their per-track sequences
+# without the stock class/four-instrument program collapses.
+for replay_config, audio_is_samples in (
+    (datasets.REPLAY_MAESTROV3_CONFIG, False),
+    (datasets.REPLAY_GUITARSET_CONFIG, False),
+    (datasets.REPLAY_URMP_CONFIG, False),
+    (datasets.REPLAY_MUSICNET_EM_CONFIG, True),
+):
+  add_transcription_task_to_registry(
+      dataset_config=replay_config,
+      spectrogram_config=SPECTROGRAM_CONFIG,
+      vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+      tokenize_fn=functools.partial(
+          preprocessors.tokenize_transcription_example,
+          audio_is_samples=audio_is_samples,
+          id_feature_key='id'),
+      onsets_only=False,
+      include_ties=True)
+
+for replay_config in (
+    datasets.REPLAY_CERBERUS4_CONFIG,
+    datasets.REPLAY_SLAKH_CONFIG,
+):
+  add_transcription_task_to_registry(
+      dataset_config=replay_config,
+      spectrogram_config=SPECTROGRAM_CONFIG,
+      vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+      tokenize_fn=functools.partial(
+          preprocessors.tokenize_slakh_example,
+          track_specs=None,
+          ignore_pitch_bends=True,
+          preserve_programs=True),
+      onsets_only=False,
+      include_ties=True)
+
+
+REPLAY_TASK_RATES = {
+    # Rates sum to 20%; the guitar corpus supplies the other 80%. The replay
+    # allocation favors the three sources closest to real-song guitar/band
+    # transcription without repeatedly oversampling the one MAESTRO recording.
+    'replay_guitarset': 0.06,
+    'replay_slakh': 0.05,
+    'replay_cerberus4': 0.04,
+    'replay_musicnet_em': 0.02,
+    'replay_urmp': 0.02,
+    'replay_maestrov3': 0.01,
+}
+_NO_RHYTHM_GUITAR_TRAIN = construct_task_name(
+    task_prefix='guitar_pilot_notes_ties',
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+    task_suffix='train')
+_NO_RHYTHM_GUITAR_EVAL = construct_task_name(
+    task_prefix='guitar_pilot_notes_ties',
+    spectrogram_config=SPECTROGRAM_CONFIG,
+    vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+    task_suffix='eval_test')
+_REPLAY_MIXTURE_PREFIX = 'guitar_pilot_replay_notes_ties'
+seqio.MixtureRegistry.add(
+    construct_task_name(
+        task_prefix=_REPLAY_MIXTURE_PREFIX,
+        spectrogram_config=SPECTROGRAM_CONFIG,
+        vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+        task_suffix='train'),
+    [(_NO_RHYTHM_GUITAR_TRAIN, 0.8)] + [
+        (construct_task_name(
+            task_prefix=f'{dataset_name}_notes_ties',
+            spectrogram_config=SPECTROGRAM_CONFIG,
+            vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+            task_suffix='train'), rate)
+        for dataset_name, rate in REPLAY_TASK_RATES.items()
+    ])
+# Infer-eval remains guitar-only so the tracked metric stays comparable with
+# earlier runs. Original-dataset retention should be evaluated separately.
+seqio.MixtureRegistry.add(
+    construct_task_name(
+        task_prefix=_REPLAY_MIXTURE_PREFIX,
+        spectrogram_config=SPECTROGRAM_CONFIG,
+        vocab_config=VOCAB_CONFIG_NOVELOCITY_NORHYTHM,
+        task_suffix='eval'),
+    [(_NO_RHYTHM_GUITAR_EVAL, 1.0)])
+
+
 # Construct task names to include in transcription mixture.
 MIXTURE_DATASET_NAMES = [
     'maestrov3', 'guitarset', 'urmp', 'musicnet_em', 'cerberus4', 'slakh'

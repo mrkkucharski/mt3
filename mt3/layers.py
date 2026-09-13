@@ -562,7 +562,7 @@ class FixedEmbed(nn.Module):
     dtype: The DType to use for the embeddings.
   """
   features: int
-  max_length: int = 2048
+  max_length: int = 4096
   embedding_init: Initializer = sinusoidal()
   dtype: jnp.dtype = jnp.float32
 
@@ -585,6 +585,13 @@ class FixedEmbed(nn.Module):
     Returns:
       The fixed position embeddings <float32>[batch_size, seq_len, features].
     """
+    # Also checks the full-length cache initialization call during decoding.
+    # An oversized sequence would otherwise produce NaNs in the training lookup.
+    if inputs.shape[-1] > self.max_length:
+      raise ValueError(
+          f'Position sequence length {inputs.shape[-1]} exceeds FixedEmbed '
+          f'capacity {self.max_length}.')
+
     # We use a cache position index for tracking decoding position.
     if decode:
       position_embedder_index = self.variable(

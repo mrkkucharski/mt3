@@ -84,7 +84,7 @@ def _include_inputs(ds, input_record, fields_to_omit=('audio',)):
     for key in set(input_record.keys()) - set(output_record.keys()):
       output_record[key] = input_record[key]
     for key in fields_to_omit:
-      del output_record[key]
+      output_record.pop(key, None)
     return output_record
   return ds.map(include_inputs_fn,
                 num_parallel_calls=tf.data.experimental.AUTOTUNE)
@@ -138,7 +138,8 @@ def tokenize_transcription_example(
       samples = audio
       if sample_rate != spectrogram_config.sample_rate:
         samples = librosa.resample(
-            samples, sample_rate, spectrogram_config.sample_rate)
+            samples, orig_sr=sample_rate,
+            target_sr=spectrogram_config.sample_rate)
     else:
       samples = note_seq.audio_io.wav_data_to_samples_librosa(
           audio, sample_rate=spectrogram_config.sample_rate)
@@ -490,6 +491,20 @@ def add_track_to_notesequence(ns: note_seq.NoteSequence,
     ns.total_time = max(ns.total_time, note.end_time)
 
 
+def add_track_to_notesequence_preserving_programs(
+    ns: note_seq.NoteSequence,
+    track: note_seq.NoteSequence,
+    ignore_pitch_bends: bool
+) -> None:
+  """Merge a track without replacing its source program or drum labels."""
+  if track.pitch_bends and not ignore_pitch_bends:
+    raise PitchBendError
+  track_sus = note_seq.apply_sustain_control_changes(track)
+  for note in track_sus.notes:
+    ns.notes.extend([note])
+    ns.total_time = max(ns.total_time, note.end_time)
+
+
 def tokenize_slakh_example(
     ds: tf.data.Dataset,
     spectrogram_config: spectrograms.SpectrogramConfig,
@@ -498,13 +513,15 @@ def tokenize_slakh_example(
     onsets_only: bool,
     include_ties: bool,
     track_specs: Optional[Sequence[note_sequences.TrackSpec]],
-    ignore_pitch_bends: bool
+    ignore_pitch_bends: bool,
+    preserve_programs: bool = False
 ) -> tf.data.Dataset:
   """Tokenize a Slakh multitrack note transcription example."""
   def tokenize(sequences, samples, sample_rate, inst_names, example_id):
     if sample_rate != spectrogram_config.sample_rate:
       samples = librosa.resample(
-          samples, sample_rate, spectrogram_config.sample_rate)
+          samples, orig_sr=sample_rate,
+          target_sr=spectrogram_config.sample_rate)
 
     frames, frame_times = _audio_to_frames(samples, spectrogram_config)
 
@@ -512,7 +529,14 @@ def tokenize_slakh_example(
     ns = note_seq.NoteSequence(ticks_per_quarter=220)
     tracks = [note_seq.NoteSequence.FromString(seq) for seq in sequences]
     assert len(tracks) == len(inst_names)
-    if track_specs:
+    if preserve_programs:
+      for track in tracks:
+        try:
+          add_track_to_notesequence_preserving_programs(
+              ns, track, ignore_pitch_bends=ignore_pitch_bends)
+        except PitchBendError:
+          return
+    elif track_specs:
       # Specific tracks expected.
       assert len(tracks) == len(track_specs)
       for track, spec, inst_name in zip(tracks, track_specs, inst_names):

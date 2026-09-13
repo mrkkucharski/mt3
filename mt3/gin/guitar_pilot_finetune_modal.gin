@@ -30,6 +30,7 @@ from __gin__ import dynamic_registration
 
 import __main__ as train_script
 from mt3 import local_training
+from mt3 import training_actions
 from t5x import utils
 
 TASK_PREFIX = 'guitar_pilot_notes_ties'
@@ -57,3 +58,13 @@ utils.SaveCheckpointConfig.period = 25
 train/utils.DatasetConfig.batch_size = %BATCH_SIZE
 train_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
 infer_eval/utils.DatasetConfig.batch_size = %BATCH_SIZE
+
+# Surface numerical divergence as a hard error before a periodic checkpoint can
+# preserve a poisoned train state. Metrics must be synchronous for TRAIN actions
+# to run; checking every 25 steps bounds detection latency independently of the
+# checkpoint/evaluation period selected by the launcher.
+train_script.train.concurrent_metrics = False
+train_script.train.stats_period = 25
+train_script.train.actions = {
+  'TRAIN': [@training_actions.FailOnNonFiniteAction()]
+}

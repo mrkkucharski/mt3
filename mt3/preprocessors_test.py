@@ -23,6 +23,7 @@ leave today's baseline behavior unchanged.
 
 from mt3 import preprocessors
 
+import note_seq
 import numpy as np
 import tensorflow as tf
 
@@ -155,6 +156,33 @@ class SplitTokensStridedTest(tf.test.TestCase):
           window_tokens=256, hop_tokens=128,
           additional_feature_keys=['input_times'],
           passthrough_feature_keys=['input_times'])
+
+
+class ReplayProgramPreservationTest(tf.test.TestCase):
+
+  def test_merge_keeps_exact_program_and_drum_labels(self):
+    track = note_seq.NoteSequence(ticks_per_quarter=220)
+    track.notes.add(start_time=0, end_time=1, pitch=60, velocity=100,
+                    program=27, is_drum=False)
+    track.notes.add(start_time=0, end_time=0.1, pitch=36, velocity=100,
+                    program=0, is_drum=True)
+    track.pitch_bends.add(time=0.5, bend=4096, program=27, is_drum=False)
+
+    merged = note_seq.NoteSequence(ticks_per_quarter=220)
+    preprocessors.add_track_to_notesequence_preserving_programs(
+        merged, track, ignore_pitch_bends=True)
+
+    self.assertEqual(
+        [(note.pitch, note.program, note.is_drum) for note in merged.notes],
+        [(60, 27, False), (36, 0, True)])
+    self.assertEmpty(merged.pitch_bends)
+
+  def test_merge_rejects_bends_when_the_codec_requires_them(self):
+    track = note_seq.NoteSequence(ticks_per_quarter=220)
+    track.pitch_bends.add(time=0.5, bend=4096, program=27, is_drum=False)
+    with self.assertRaises(preprocessors.PitchBendError):
+      preprocessors.add_track_to_notesequence_preserving_programs(
+          note_seq.NoteSequence(), track, ignore_pitch_bends=False)
 
 
 if __name__ == '__main__':

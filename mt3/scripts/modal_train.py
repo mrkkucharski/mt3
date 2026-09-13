@@ -24,6 +24,7 @@ volumes created ahead of time with:
 and populated with:
 
   modal volume put mt3-guitar-data data/pilot /pilot
+  modal volume put mt3-guitar-data original /original
   modal volume put mt3-guitar-model model/mt3 /mt3
 
 Usage (from the transcription repo root):
@@ -38,6 +39,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import threading
+import time
 
 import modal
 
@@ -189,13 +192,29 @@ def _t5x_train_command(train_steps: int,
                        context_4s: bool = False,
                        model_dir: str | None = None,
                        include_rhythm: bool = False,
-                       pitch_bends: bool = False) -> list[str]:
+                       pitch_bends: bool = False,
+                       input_frames: int | None = None,
+                       target_tokens: int | None = None,
+                       replay: bool = False) -> list[str]:
   """Builds the t5x.train argv.
 
   `context_4s` appends gin/context_4s.gin, which rebinds TASK_FEATURE_LENGTHS
   to the ~4 s window (512 input frames, 2048 target tokens). Gin applies files
   in order and last-write-wins, so the overlay must come AFTER
   guitar_pilot_finetune_modal.gin to override its 256/1024.
+
+  `input_frames`/`target_tokens` generalise that to an arbitrary window, for
+  sweeping where a window stops fitting on the GPU. They are emitted as a
+  single TASK_FEATURE_LENGTHS override, which lands after every --gin_file and
+  therefore wins over both the base config and context_4s.gin. Like
+  `context_4s`, an explicit `model_dir` is mandatory: window length is not
+  recorded inside a checkpoint, so two windows sharing a directory would
+  interleave incompatible checkpoints in one step sequence.
+
+  `target_tokens` is NOT derived automatically. mt3/CONTEXT_4S.md measured that
+  a 4 s window needs 2048, and tasks.py ends the training pipeline with
+  handle_too_long(skip=False) -- an undersized targets RAISES mid-run rather
+  than filtering, so the caller must choose it deliberately.
 
   Setting `context_4s` also forces MODEL_DIR away from the 2 s default, so a
   4 s run cannot silently write into the 2 s run's directory. Pass `model_dir`
@@ -212,6 +231,18 @@ def _t5x_train_command(train_steps: int,
     raise ValueError(
         'rhythm-free training requires an explicit model_dir: checkpoints '
         'must not be interleaved with a rhythm-trained run\'s directory.')
+  if replay and (include_rhythm or pitch_bends):
+    raise ValueError(
+        'original-data replay is registered only for the no-rhythm, '
+        'no-pitch-bend codec.')
+  if (input_frames is None) != (target_tokens is None):
+    raise ValueError(
+        'input_frames and target_tokens must be given together: targets does '
+        'not scale automatically with the window (mt3/CONTEXT_4S.md).')
+  if input_frames is not None and not model_dir:
+    raise ValueError(
+        'an explicit window requires an explicit model_dir: window length is '
+        'not recorded in a checkpoint, so two windows must not share one.')
 
   gin_files = [
       '--gin_file=mt3/gin/model.gin',
@@ -223,6 +254,9 @@ def _t5x_train_command(train_steps: int,
     gin_files.append('--gin_file=mt3/gin/no_rhythm.gin')
   if pitch_bends:
     gin_files.append('--gin_file=mt3/gin/pitch_bends.gin')
+  if replay:
+    # Must follow no_rhythm.gin: the registered replay mixture is vb1nr.
+    gin_files.append('--gin_file=mt3/gin/replay.gin')
   if context_4s:
     gin_files.append('--gin_file=mt3/gin/context_4s.gin')
     overrides.append(
@@ -232,6 +266,10 @@ def _t5x_train_command(train_steps: int,
         f"--gin.MODEL_DIR='{model_dir or CONTEXT_4S_MODEL_DIR}'")
   elif model_dir:
     overrides.append(f"--gin.MODEL_DIR='{model_dir}'")
+  if input_frames is not None:
+    overrides.append(
+        '--gin.TASK_FEATURE_LENGTHS='
+        f"{{'inputs': {input_frames}, 'targets': {target_tokens}}}")
 
   return [
       'python', '-m', 't5x.train',
@@ -259,13 +297,61 @@ def _t5x_train_command(train_steps: int,
   ]
 
 
+class _GpuMemorySampler(threading.Thread):
+  """Samples GPU memory WHILE training runs, for window feasibility sweeps.
+
+  Sampling after the t5x subprocess exits reports ~0 -- the process has already
+  released the card (observed 2026-09-06: a completed 1000-step run reported
+  "5 MiB"). Only a concurrent sampler sees anything real.
+
+  CAVEAT ON INTERPRETATION: JAX preallocates ~75% of the device up front, so
+  the peak reported here is the size of that pool, not what the model needs.
+  It answers "did the card have room at all", and is deliberately left at the
+  default -- disabling preallocation would change allocation behaviour and so
+  change whether a given window fits, which is the very thing being measured.
+  """
+
+  def __init__(self, interval_seconds: float = 5.0):
+    super().__init__(daemon=True)
+    self.interval = interval_seconds
+    self.peak_mib = 0
+    self.name_and_total = 'unknown'
+    self._stop = threading.Event()
+
+  def stop(self) -> None:
+    self._stop.set()
+
+  def run(self) -> None:
+    while not self._stop.is_set():
+      try:
+        out = subprocess.run(
+            ['nvidia-smi',
+             '--query-gpu=name,memory.total,memory.used',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=30)
+        name, total, used = (f.strip() for f in out.stdout.strip().split(','))
+        self.name_and_total = f'{name}, {total} MiB total'
+        self.peak_mib = max(self.peak_mib, int(used))
+      except Exception:  # pylint: disable=broad-except
+        pass  # A missing or failing nvidia-smi must not fail the run.
+      self._stop.wait(self.interval)
+
+  def summary(self) -> str:
+    return (f'gpu memory: {self.name_and_total}; '
+            f'peak used during run {self.peak_mib} MiB '
+            f'(JAX preallocates ~75%, so this is pool size, not requirement)')
+
+
 @app.function(image=image, gpu='A10G', timeout=4 * 60 * 60, volumes=VOLUMES)
 def run_training(train_steps: int = 1,
                  save_period: int = 25,
                  context_4s: bool = False,
                  model_dir: str | None = None,
                  include_rhythm: bool = False,
-                 pitch_bends: bool = False) -> None:
+                 pitch_bends: bool = False,
+                 input_frames: int | None = None,
+                 target_tokens: int | None = None,
+                 replay: bool = False) -> None:
   """Runs one t5x.train invocation and commits the run-artifacts volume.
 
   `train_steps` is relative to wherever the restored checkpoint currently
@@ -283,10 +369,27 @@ def run_training(train_steps: int = 1,
   rebuild_checkpoint_0_view(Path('/workspace/model/mt3'))
   _ensure_cuda_library_path()
 
+  if replay and not Path('/workspace/data/original').is_dir():
+    raise FileNotFoundError(
+        'replay data is not staged at /workspace/data/original; upload it '
+        'with: modal volume put mt3-guitar-data original /original')
+
   command = _t5x_train_command(train_steps, save_period, context_4s, model_dir,
-                               include_rhythm, pitch_bends)
+                               include_rhythm, pitch_bends, input_frames,
+                               target_tokens, replay)
   print('t5x command:', ' '.join(command), flush=True)
-  result = subprocess.run(command, cwd='/workspace/mt3')
+  sampler = _GpuMemorySampler()
+  sampler.start()
+  started = time.time()
+  try:
+    result = subprocess.run(command, cwd='/workspace/mt3')
+  finally:
+    sampler.stop()
+  elapsed = time.time() - started
+  # Printed unconditionally, before check_returncode(), so a run that dies of
+  # an out-of-memory error still reports how far it got and how long it took.
+  print(f't5x exited {result.returncode} after {elapsed:.1f}s', flush=True)
+  print(sampler.summary(), flush=True)
   runs_volume.commit()
   result.check_returncode()
 
@@ -322,7 +425,10 @@ def main(train_steps: int = 1,
          context_4s: bool = False,
          model_dir: str | None = None,
          include_rhythm: bool = False,
-         pitch_bends: bool = False) -> None:
+         pitch_bends: bool = False,
+         input_frames: int | None = None,
+         target_tokens: int | None = None,
+         replay: bool = False) -> None:
   # .spawn(), not .remote(): .remote() blocks the local process on an open
   # connection for the whole run, so a local disconnect kills the remote job
   # even with `modal run --detach` (PROJECT_LOG.md, 2026-08-09, "modal_train.py
@@ -330,4 +436,7 @@ def main(train_steps: int = 1,
   run_training.spawn(train_steps=train_steps, save_period=save_period,
                      context_4s=context_4s, model_dir=model_dir,
                      include_rhythm=include_rhythm,
-                     pitch_bends=pitch_bends)
+                     pitch_bends=pitch_bends,
+                     input_frames=input_frames,
+                     target_tokens=target_tokens,
+                     replay=replay)
