@@ -390,6 +390,10 @@ def run_training(train_steps: int = 1,
   # an out-of-memory error still reports how far it got and how long it took.
   print(f't5x exited {result.returncode} after {elapsed:.1f}s', flush=True)
   print(sampler.summary(), flush=True)
+  # Checkpoints and periodic inference metrics live on model_volume; committing
+  # only runs_volume leaves a newly written checkpoint visible in the dashboard
+  # but unavailable to external readers until an incidental later commit.
+  model_volume.commit()
   runs_volume.commit()
   result.check_returncode()
 
