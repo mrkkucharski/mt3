@@ -20,3 +20,18 @@ flax @ git+https://github.com/google/flax@c31deb2b8ec8d0cc1b2092aa81890823d21a47
 # the Modal image build ("Requirements contain conflicting URLs for package
 # `seqio`"). Keep in sync with pyproject.toml's [tool.uv.sources] seqio rev.
 seqio @ git+https://github.com/google/seqio@aaa0e111c5e9d8fb49bfa992f2272a121a95f741
+
+# `t5` leaves `transformers` effectively unbounded below, so the resolver is
+# free to backtrack into 2021-era releases. A rebuild on 2026-10-04 did
+# exactly that -- transformers 4.12.2, which pins tokenizers 0.10.3, which
+# publishes no cp311 wheel -- so the build tried to compile tokenizers from
+# source and died for want of a Rust toolchain. Nothing about the image
+# changed to cause it: `add_local_dir(copy=True)` sits above `uv pip install`,
+# so editing any file in the fork invalidates that layer and re-resolves the
+# whole graph from scratch, which is when the drift surfaces.
+#
+# Pinned to the versions uv.lock already resolves locally (a working install),
+# rather than to a floor, because resolver drift between otherwise identical
+# builds is the recurring failure mode here. Keep in sync with uv.lock.
+transformers==4.57.6
+tokenizers==0.22.2

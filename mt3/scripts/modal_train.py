@@ -195,7 +195,8 @@ def _t5x_train_command(train_steps: int,
                        pitch_bends: bool = False,
                        input_frames: int | None = None,
                        target_tokens: int | None = None,
-                       replay: bool = False) -> list[str]:
+                       replay: bool = False,
+                       checkpoint_path: str | None = None) -> list[str]:
   """Builds the t5x.train argv.
 
   `context_4s` appends gin/context_4s.gin, which rebinds TASK_FEATURE_LENGTHS
@@ -226,6 +227,16 @@ def _t5x_train_command(train_steps: int,
   and metrics) without touching the corpus. `include_rhythm` opts into the
   legacy rhythm-aware encoding. Rhythm-free runs demand an explicit
   `model_dir`: nothing inside a checkpoint records which encoding produced it.
+
+  `checkpoint_path` rebinds CHECKPOINT_PATH, the `mode='specific'` restore
+  source that otherwise defaults to the official `checkpoint_0` -- i.e. it
+  forks a new experiment from an arbitrary existing checkpoint without
+  copying it into `model_dir` first (`modal volume cp -r` is unsupported on
+  these volumes, so the alternative is a download/re-upload round trip; see
+  PROJECT_LOG.md, 2026-09-05). It only takes effect when `model_dir` has no
+  checkpoints of its own: T5X resumes from the newest checkpoint already in
+  the model directory and ignores the restore config entirely whenever one
+  exists, so a fork must point at a directory that is genuinely new.
   """
   if not include_rhythm and not model_dir:
     raise ValueError(
@@ -266,6 +277,8 @@ def _t5x_train_command(train_steps: int,
         f"--gin.MODEL_DIR='{model_dir or CONTEXT_4S_MODEL_DIR}'")
   elif model_dir:
     overrides.append(f"--gin.MODEL_DIR='{model_dir}'")
+  if checkpoint_path:
+    overrides.append(f"--gin.CHECKPOINT_PATH='{checkpoint_path}'")
   if input_frames is not None:
     overrides.append(
         '--gin.TASK_FEATURE_LENGTHS='
@@ -342,7 +355,24 @@ class _GpuMemorySampler(threading.Thread):
             f'(JAX preallocates ~75%, so this is pool size, not requirement)')
 
 
-@app.function(image=image, gpu='A10G', timeout=4 * 60 * 60, volumes=VOLUMES)
+# Explicit host-RAM request (MiB): with Modal's default, a 12 s replay run was
+# terminated for "exceeding its memory request" during periodic inference eval
+# (ap-MIiUI2zcXyuwpeYnYrp2wS, 2026-09-14), and Modal's automatic restart then
+# re-applied relative_steps from the newer checkpoint, overshooting by 30k steps.
+TRAINING_MEMORY_MIB = 32768
+
+# Headroom over the longest leg actually launched: 50k steps at the 12 s
+# window measures ~3 h on an A10G (extrapolated from the 30 k legs in
+# PROJECT_LOG.md, 2026-09-14) plus one periodic inference eval per save.
+# The ceiling matters beyond wasted GPU time -- a timeout is an abnormal
+# exit, and Modal's automatic restart then re-applies `relative_steps` from
+# the newest checkpoint, overshooting the intended total (same mechanism as
+# the host-OOM restart noted above).
+TRAINING_TIMEOUT_SECONDS = 6 * 60 * 60
+
+
+@app.function(image=image, gpu='A10G', memory=TRAINING_MEMORY_MIB,
+              timeout=TRAINING_TIMEOUT_SECONDS, volumes=VOLUMES)
 def run_training(train_steps: int = 1,
                  save_period: int = 25,
                  context_4s: bool = False,
@@ -351,7 +381,8 @@ def run_training(train_steps: int = 1,
                  pitch_bends: bool = False,
                  input_frames: int | None = None,
                  target_tokens: int | None = None,
-                 replay: bool = False) -> None:
+                 replay: bool = False,
+                 checkpoint_path: str | None = None) -> None:
   """Runs one t5x.train invocation and commits the run-artifacts volume.
 
   `train_steps` is relative to wherever the restored checkpoint currently
@@ -376,7 +407,7 @@ def run_training(train_steps: int = 1,
 
   command = _t5x_train_command(train_steps, save_period, context_4s, model_dir,
                                include_rhythm, pitch_bends, input_frames,
-                               target_tokens, replay)
+                               target_tokens, replay, checkpoint_path)
   print('t5x command:', ' '.join(command), flush=True)
   sampler = _GpuMemorySampler()
   sampler.start()
@@ -432,7 +463,8 @@ def main(train_steps: int = 1,
          pitch_bends: bool = False,
          input_frames: int | None = None,
          target_tokens: int | None = None,
-         replay: bool = False) -> None:
+         replay: bool = False,
+         checkpoint_path: str | None = None) -> None:
   # .spawn(), not .remote(): .remote() blocks the local process on an open
   # connection for the whole run, so a local disconnect kills the remote job
   # even with `modal run --detach` (PROJECT_LOG.md, 2026-08-09, "modal_train.py
@@ -443,4 +475,5 @@ def main(train_steps: int = 1,
                      pitch_bends=pitch_bends,
                      input_frames=input_frames,
                      target_tokens=target_tokens,
-                     replay=replay)
+                     replay=replay,
+                     checkpoint_path=checkpoint_path)
